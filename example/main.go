@@ -60,6 +60,11 @@ func main() {
 	yaml, err := swagger.GenerateOpenAPI(swagger.Config{
 		Title:   "Folders API",
 		Version: "1.0.0",
+		Servers: []swagger.Server{
+			{URL: "https://api.prod.example.com/v1", Description: "Production"},
+			{URL: "https://api.staging.example.com/v1", Description: "Staging"},
+			{URL: "http://localhost:8080/v1", Description: "Local"},
+		},
 	})
 	if err != nil {
 		log.Fatalf("generate openapi: %v", err)
@@ -67,5 +72,5 @@ func main() {
 	fmt.Println(string(yaml))
 
 	log.Println("Listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Fatal(http.ListenAndServe(":8081", mux))
 }

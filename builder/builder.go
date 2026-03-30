@@ -15,9 +15,16 @@ import (
 type OpenAPISpec struct {
 	OpenAPI    string                `yaml:"openapi" json:"openapi"`
 	Info       Info                  `yaml:"info" json:"info"`
+	Servers    []Server              `yaml:"servers,omitempty" json:"servers,omitempty"`
 	Paths      map[string]*PathItem  `yaml:"paths" json:"paths"`
 	Components Components            `yaml:"components" json:"components"`
 	Security   []SecurityRequirement `yaml:"security,omitempty" json:"security,omitempty"`
+}
+
+// Server represents an OpenAPI 3.0 Server Object.
+type Server struct {
+	URL         string `yaml:"url" json:"url"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
 }
 
 type Info struct {
@@ -78,6 +85,26 @@ type SecurityRequirement map[string][]string
 type Config struct {
 	Title   string
 	Version string
+
+	// BasePath is the URL prefix that an external reverse proxy (e.g. Caddy)
+	// routes to this service. It is emitted as an OpenAPI servers entry so that
+	// Swagger UI sends requests to the correct path.
+	//
+	// The service itself never sees this prefix — Caddy strips it before
+	// forwarding. Paths in the spec remain relative to the service root.
+	//
+	// Example:
+	//   BasePath: "/nomenclature-service"
+	//   → servers: [{url: "/nomenclature-service"}]
+	//   Swagger UI will call /nomenclature-service/v1/folders
+	//   Caddy strips /nomenclature-service → service receives /v1/folders
+	//
+	// Leave empty to omit the servers block (default: relative root "/").
+	BasePath string
+
+	// Servers allows full control over the servers block when BasePath is not
+	// sufficient (e.g. multiple environments). If set, BasePath is ignored.
+	Servers []Server
 }
 
 // DefaultConfig returns sensible defaults.
@@ -105,14 +132,23 @@ func Build(reg *registry.Registry, cfg Config) (*OpenAPISpec, error) {
 		},
 	}
 
-	eps, err := reg.Endpoints()
+	// Servers: explicit list wins; fall back to BasePath shorthand.
+	switch {
+	case len(cfg.Servers) > 0:
+		spec.Servers = cfg.Servers
+	case cfg.BasePath != "":
+		spec.Servers = []Server{{URL: cleanBasePath(cfg.BasePath)}}
+	}
+
+	endpoints, err := reg.Endpoints()
 	if err != nil {
 		return nil, err
 	}
 
-	// For each registered endpoint, find its path and method, then build the
-	// corresponding Operation and insert it into the correct PathItem in the spec.
-	for _, ep := range eps {
+	for _, ep := range endpoints {
+		if ep.Path == "" || ep.Method == "" {
+			continue
+		}
 		path := chiPathToOpenAPI(ep.Path)
 		if _, ok := spec.Paths[path]; !ok {
 			spec.Paths[path] = &PathItem{}
@@ -121,7 +157,6 @@ func Build(reg *registry.Registry, cfg Config) (*OpenAPISpec, error) {
 		setOperation(spec.Paths[path], ep.Method, op)
 	}
 
-	// Components.Schemas is the same map as gen.Components — already populated.
 	return spec, nil
 }
 
@@ -269,4 +304,13 @@ func SortedPaths(paths map[string]*PathItem) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// cleanBasePath normalises a base path: ensures leading slash, removes trailing slash.
+func cleanBasePath(p string) string {
+	p = strings.TrimRight(p, "/")
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
 }

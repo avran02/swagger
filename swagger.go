@@ -23,6 +23,7 @@ const (
 
 // Config is re-exported for convenience.
 type Config = builder.Config
+type Server = builder.Server
 
 // DefaultConfig returns sensible spec metadata defaults.
 func DefaultConfig() Config { return builder.DefaultConfig() }
