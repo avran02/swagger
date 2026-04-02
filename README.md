@@ -8,20 +8,18 @@ Works with [chi](https://github.com/go-chi/chi) out of the box. No changes to yo
 
 ## How it works
 
-```golang
-// stores metadata in registry, keyed by handler function pointer
+```
 RegisterRequestDTO(ctrl.Create, dto.Req{}, dto.Resp{}, swagger.Bearer, "Articles")
+  → stores metadata in registry, keyed by handler function pointer
 
-
-// walks the chi route tree, matches each handler by pointer
-// fills in Path + Method for every registered endpoint
 swagger.SetRouter(func(fn registry.WalkFunc) error {
     return chi.Walk(chiMux, chi.WalkFunc(fn))
 })
+  → walks the chi route tree, matches each handler by pointer
+  → fills in Path + Method for every registered endpoint
 
-
-// builds the full OpenAPI 3.0 spec from resolved endpoints + reflected DTO types
 swagger.GenerateOpenAPI()
+  → builds the full OpenAPI 3.0 spec from resolved endpoints + reflected DTO types
 ```
 
 Path and method come from chi — one source of truth, no duplication, no drift.
@@ -29,7 +27,7 @@ Path and method come from chi — one source of truth, no duplication, no drift.
 ## Installation
 
 ```bash
-go get github.com/avran02/swagger
+go get github.com/your-org/goswagger
 ```
 
 Requires Go 1.22+. No external dependencies beyond chi itself.
@@ -40,7 +38,7 @@ Requires Go 1.22+. No external dependencies beyond chi itself.
 
 Wrap your handlers with `swagger.RegisterRequestDTO` wherever you define routes. The signature is identical to `http.HandlerFunc` — chi accepts it directly:
 
-```golang
+```go
 func SetupArticlesRoutes(r *chi.Mux, ctrl *ArticlesController) {
     r.Route("/articles", func(r chi.Router) {
         r.Post("/", swagger.RegisterRequestDTO(
@@ -74,7 +72,7 @@ func SetupArticlesRoutes(r *chi.Mux, ctrl *ArticlesController) {
 
 Call `SetRouter` once after all routes are mounted. This tells the library how to walk the route tree to resolve paths:
 
-```golang
+```go
 func NewRouter(ctrl *Controller) *chi.Mux {
     mux := chi.NewRouter()
 
@@ -101,7 +99,7 @@ func NewRouter(ctrl *Controller) *chi.Mux {
 
 Use `BindRequest` inside your handlers to fill a struct from the incoming request:
 
-```golang
+```go
 func (c *ArticlesController) Create(w http.ResponseWriter, r *http.Request) {
     var req dto.ArticleCreateRequest
     if err := swagger.BindRequest(r, &req); err != nil {
@@ -128,7 +126,7 @@ Fields are populated from the request based on their struct tags:
 
 A single struct can mix all sources:
 
-```golang
+```go
 type UpdateArticleRequest struct {
     // From path
     ID string `path:"id"`
@@ -182,7 +180,7 @@ Recursive types (e.g. tree nodes that reference themselves) are handled correctl
 
 ### Full example DTO
 
-```golang
+```go
 type FolderTreeRequest struct {
     CompanyID int64  `header:"X-Company-ID" required:"false" default:"0"   description:"Company scope"`
     RootID    *int64 `query:"root"          required:"false"                description:"Root folder ID, omit for full tree"`
@@ -201,7 +199,7 @@ type FolderTreeNodeResponse struct {
 
 Pass `swagger.Public` or `swagger.Bearer` as the `authType` argument to `RegisterRequestDTO`:
 
-```golang
+```go
 // No auth required
 swagger.RegisterRequestDTO(ctrl.List, dto.Req{}, dto.Resp{}, swagger.Public, "Tag")
 
@@ -213,7 +211,7 @@ Bearer endpoints emit `security: [{bearerAuth: []}]` and a `401` response. The `
 
 ## Serving the spec
 
-```golang
+```go
 cfg := swagger.Config{
     Title:   "My API",
     Version: "1.0.0",
@@ -228,7 +226,7 @@ mux.Get("/openapi.json", swagger.ServeSpecJSON(cfg))
 
 Or generate the bytes directly:
 
-```golang
+```go
 yaml, err := swagger.GenerateOpenAPI(cfg)
 json, err := swagger.GenerateOpenAPIJSON(cfg)
 ```
@@ -237,7 +235,7 @@ json, err := swagger.GenerateOpenAPIJSON(cfg)
 
 If an upstream proxy (Caddy, nginx, etc.) routes to this service by a path prefix and strips it before forwarding, set `BasePath` so Swagger UI sends requests to the right URL:
 
-```golang
+```go
 swagger.Config{
     Title:    "Folders Service",
     Version:  "1.0.0",
@@ -259,7 +257,7 @@ Swagger UI concatenates `server.url + path` → `/folders-service/v1/folders`. T
 
 For multiple environments use `Servers` directly (takes priority over `BasePath`):
 
-```golang
+```go
 swagger.Config{
     Title:   "Folders Service",
     Version: "1.0.0",
@@ -292,3 +290,70 @@ Zero non-stdlib dependencies. The YAML serialiser is built in — no `gopkg.in/y
 **Call order.** `SetRouter` must be called after all routes are mounted. `GenerateOpenAPI` (and `ServeSpec`) can be called any number of times after that — the Walk result is cached and only re-computed when new handlers are registered.
 
 **Thread safety.** The registry is protected by a `sync.RWMutex`. Safe to call from multiple goroutines.
+
+## Swagger UI
+
+No files to download, embed, or deploy. The UI is served directly from unpkg CDN.
+
+### One-liner setup
+
+```go
+swagger.MountDocs(r, "/docs", swagger.Config{
+    Title:   "My API",
+    Version: "1.0.0",
+}, swagger.UIConfig{})
+```
+
+Registers four routes automatically:
+
+| Route | Response |
+|---|---|
+| `GET /docs` | 301 → `/docs/` |
+| `GET /docs/` | Swagger UI HTML |
+| `GET /docs/openapi.yaml` | OpenAPI spec (YAML) |
+| `GET /docs/openapi.json` | OpenAPI spec (JSON) |
+
+### Custom configuration
+
+```go
+swagger.MountDocs(r, "/docs",
+    swagger.Config{
+        Title:    "Folders Service",
+        Version:  "1.0.0",
+        BasePath: "/folders-service",
+    },
+    swagger.UIConfig{
+        // Pin a specific swagger-ui version for reproducible builds.
+        CDN: "https://unpkg.com/swagger-ui-dist@5.17.14",
+
+        // Pre-expand all operations on load.
+        DocExpansion: "full",
+
+        // Enable "Try it out" for all operations by default.
+        TryItOutEnabled: boolPtr(true),
+    },
+)
+```
+
+### Separate spec and UI paths
+
+```go
+mux.Get("/openapi.yaml", swagger.ServeSpec(cfg))
+mux.Get("/docs",         swagger.ServeUI(swagger.UIConfig{
+    SpecURL: "/openapi.yaml",
+}))
+```
+
+### UIConfig reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `Title` | `string` | `"<spec title> – Swagger UI"` | Browser tab title |
+| `SpecURL` | `string` | `"./openapi.yaml"` | URL of the OpenAPI spec |
+| `CDN` | `string` | `unpkg.com/swagger-ui-dist@5.17.14` | CDN base URL for assets |
+| `DeepLinking` | `*bool` | `true` | Deep links for tags and operations |
+| `DefaultModelsExpandDepth` | `*int` | `1` | Schema expansion depth (`-1` hides Models section) |
+| `DocExpansion` | `string` | `"list"` | `"list"` / `"full"` / `"none"` |
+| `Filter` | `*bool` | `true` | Show search/filter bar |
+| `PersistAuthorization` | `*bool` | `true` | Keep auth tokens across browser refreshes |
+| `TryItOutEnabled` | `*bool` | `false` | Pre-enable "Try it out" for all operations |
