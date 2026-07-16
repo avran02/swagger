@@ -10,6 +10,7 @@ import (
 
 	"github.com/avran02/swagger/binder"
 	"github.com/avran02/swagger/builder"
+	"github.com/avran02/swagger/codec"
 	"github.com/avran02/swagger/registry"
 	"github.com/avran02/swagger/types"
 )
@@ -35,6 +36,13 @@ type (
 	FieldError      = binder.FieldError
 )
 
+// JSONCodec and StrictJSONCodec are re-exported so callers can plug in a
+// faster JSON implementation without importing the codec package directly.
+type (
+	JSONCodec       = codec.Codec
+	StrictJSONCodec = codec.StrictCodec
+)
+
 // DefaultConfig returns sensible spec metadata defaults.
 func DefaultConfig() Config { return builder.DefaultConfig() }
 
@@ -44,6 +52,18 @@ func DefaultConfig() Config { return builder.DefaultConfig() }
 //	swagger.SetURLParamFunc(chi.URLParam)
 func SetURLParamFunc(fn func(r *http.Request, key string) string) {
 	binder.SetURLParamFunc(fn)
+}
+
+// SetJSONCodec replaces the JSON implementation used for request bodies and
+// error responses (encoding/json by default) with c — e.g. an adapter around
+// goccy/go-json, jsoniter, or sonic. Call once during application startup,
+// before serving requests.
+//
+// Implement StrictJSONCodec if your codec can reject unknown body fields;
+// codecs that only implement JSONCodec fall back to permissive decoding —
+// unknown fields are silently ignored instead of producing a 422.
+func SetJSONCodec(c JSONCodec) {
+	codec.Set(c)
 }
 
 // SetRouter tells the library how to walk the chi route tree to resolve
@@ -128,7 +148,7 @@ func WriteValidationError(w http.ResponseWriter, err error) {
 			Type: "validation_error",
 		}}}
 	}
-	data, merr := json.Marshal(verr)
+	data, merr := codec.Marshal(verr)
 	if merr != nil {
 		http.Error(w, merr.Error(), http.StatusInternalServerError)
 		return

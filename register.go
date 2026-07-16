@@ -1,9 +1,9 @@
 package swagger
 
 import (
-	"encoding/json"
 	"net/http"
 
+	"github.com/avran02/swagger/codec"
 	"github.com/avran02/swagger/registry"
 	"github.com/avran02/swagger/types"
 )
@@ -100,7 +100,7 @@ func (b *Registration) Handler() http.HandlerFunc {
 //	    return
 //	}
 func WriteError(w http.ResponseWriter, code int, body any) {
-	data, err := json.Marshal(body)
+	data, err := codec.Marshal(body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/avran02/swagger/binder"
 	"github.com/avran02/swagger/types"
 )
 
@@ -60,6 +61,9 @@ func (r *Registry) SetWalker(w Walker) {
 // resolved later by walking the chi router tree.
 func (r *Registry) RegisterMeta(handler http.HandlerFunc, meta types.EndpointMeta) http.HandlerFunc {
 	meta.HandlerPtr = funcPtr(handler)
+	// Warm the binder's reflection cache now so the first request to this
+	// endpoint doesn't pay for compiling the binding plan.
+	binder.Precompile(meta.RequestDTO)
 	r.mu.Lock()
 	r.byPtr[meta.HandlerPtr] = &meta
 	r.resolved = nil // invalidate
