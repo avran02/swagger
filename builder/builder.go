@@ -1,11 +1,14 @@
 package builder
 
 import (
+	"net/http"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/avran02/swagger/binder"
 	"github.com/avran02/swagger/registry"
 	"github.com/avran02/swagger/schema"
 	"github.com/avran02/swagger/types"
@@ -105,6 +108,18 @@ type Config struct {
 	// Servers allows full control over the servers block when BasePath is not
 	// sufficient (e.g. multiple environments). If set, BasePath is ignored.
 	Servers []Server
+
+	// ErrorSchema, when set, is reflected like a response DTO and attached as
+	// the application/json body of every auto-generated error response
+	// (400, 401, 500). Pass a value of your API's error type:
+	//
+	//	swagger.Config{ErrorSchema: dto.APIError{}}
+	ErrorSchema any
+
+	// Document422 adds a "422 Unprocessable Entity" response (with the
+	// binder.ValidationError schema, FastAPI-style) to every operation that
+	// has a request DTO. Enable it when handlers use swagger.BindOr422.
+	Document422 bool
 }
 
 // DefaultConfig returns sensible defaults.
@@ -153,7 +168,7 @@ func Build(reg *registry.Registry, cfg Config) (*OpenAPISpec, error) {
 		if _, ok := spec.Paths[path]; !ok {
 			spec.Paths[path] = &PathItem{}
 		}
-		op := buildOperation(gen, ep)
+		op := buildOperation(gen, ep, cfg)
 		setOperation(spec.Paths[path], ep.Method, op)
 	}
 
@@ -161,9 +176,10 @@ func Build(reg *registry.Registry, cfg Config) (*OpenAPISpec, error) {
 }
 
 // buildOperation creates a single OpenAPI Operation from endpoint metadata.
-func buildOperation(gen *schema.Generator, ep types.EndpointMeta) *Operation {
+func buildOperation(gen *schema.Generator, ep types.EndpointMeta, cfg Config) *Operation {
 	op := &Operation{
 		Tags:        ep.Tags,
+		Summary:     ep.Summary,
 		OperationID: operationID(ep.Method, ep.Path),
 		Responses:   make(map[string]*Response),
 	}
@@ -208,11 +224,53 @@ func buildOperation(gen *schema.Generator, ep types.EndpointMeta) *Operation {
 		op.Responses["204"] = &Response{Description: "No Content"}
 	}
 
-	op.Responses["400"] = &Response{Description: "Bad Request"}
-	op.Responses["500"] = &Response{Description: "Internal Server Error"}
+	// Auto-generated error responses. When cfg.ErrorSchema is set they carry
+	// its schema as the JSON body.
+	errResp := func(desc string) *Response {
+		resp := &Response{Description: desc}
+		if cfg.ErrorSchema != nil {
+			resp.Content = map[string]*MediaType{
+				"application/json": {Schema: gen.SchemaForType(reflect.TypeOf(cfg.ErrorSchema))},
+			}
+		}
+		return resp
+	}
+	op.Responses["400"] = errResp("Bad Request")
+	op.Responses["500"] = errResp("Internal Server Error")
 
 	if ep.Security == types.Bearer {
-		op.Responses["401"] = &Response{Description: "Unauthorized"}
+		op.Responses["401"] = errResp("Unauthorized")
+	}
+
+	// FastAPI-style validation error, documented for operations that bind a
+	// request DTO (see swagger.BindOr422).
+	if cfg.Document422 && ep.RequestDTO != nil {
+		op.Responses["422"] = &Response{
+			Description: "Validation Error",
+			Content: map[string]*MediaType{
+				"application/json": {Schema: gen.SchemaForType(reflect.TypeOf(binder.ValidationError{}))},
+			},
+		}
+	}
+
+	// Per-endpoint error responses declared via swagger.Register(...).WithError.
+	// They override the auto-generated response for the same code.
+	for _, e := range ep.Errors {
+		desc := e.Description
+		if desc == "" {
+			desc = http.StatusText(e.Code)
+		}
+		resp := &Response{Description: desc}
+		errSchema := e.Schema
+		if errSchema == nil {
+			errSchema = cfg.ErrorSchema
+		}
+		if errSchema != nil {
+			resp.Content = map[string]*MediaType{
+				"application/json": {Schema: gen.SchemaForType(reflect.TypeOf(errSchema))},
+			}
+		}
+		op.Responses[strconv.Itoa(e.Code)] = resp
 	}
 
 	return op

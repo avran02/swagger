@@ -5,6 +5,7 @@ package swagger
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/avran02/swagger/binder"
@@ -25,6 +26,13 @@ const (
 type (
 	Config = builder.Config
 	Server = builder.Server
+)
+
+// ValidationError and FieldError are re-exported so callers can inspect
+// binding failures without importing the binder package.
+type (
+	ValidationError = binder.ValidationError
+	FieldError      = binder.FieldError
 )
 
 // DefaultConfig returns sensible spec metadata defaults.
@@ -55,6 +63,8 @@ func SetRouter(walker registry.Walker) {
 
 // RegisterRequestDTO records handler metadata in the global registry and
 // returns the original handler unchanged for direct use with chi.
+// It is a positional shorthand for the fluent Register builder — use Register
+// when you need per-endpoint error codes, summaries, or custom schemas.
 //
 // Path and Method are NOT passed here — they are resolved automatically
 // by walking the chi router when the spec is generated.
@@ -82,6 +92,50 @@ func RegisterRequestDTO(
 // See binder.BindRequest for full tag semantics.
 func BindRequest(r *http.Request, dst any) error {
 	return binder.BindRequest(r, dst)
+}
+
+// BindOr422 populates dst from the request. On a binding failure it writes an
+// HTTP 422 Unprocessable Entity response with a FastAPI-style JSON body
+// ({"detail": [{"loc": ["query","page"], "msg": ..., "type": ...}, ...]}) and
+// returns false — the handler should simply return:
+//
+//	func (c *Controller) Create(w http.ResponseWriter, r *http.Request) {
+//	    var req dto.CreateRequest
+//	    if !swagger.BindOr422(w, r, &req) {
+//	        return
+//	    }
+//	    // req is fully populated here
+//	}
+//
+// Pair it with Config.Document422 so the 422 response appears in the spec.
+func BindOr422(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := binder.BindRequest(r, dst); err != nil {
+		WriteValidationError(w, err)
+		return false
+	}
+	return true
+}
+
+// WriteValidationError writes err as an HTTP 422 response in the FastAPI
+// validation-error format. Errors that are not *ValidationError are wrapped
+// into a single generic detail entry.
+func WriteValidationError(w http.ResponseWriter, err error) {
+	var verr *ValidationError
+	if !errors.As(err, &verr) {
+		verr = &ValidationError{Detail: []FieldError{{
+			Loc:  []string{"body"},
+			Msg:  err.Error(),
+			Type: "validation_error",
+		}}}
+	}
+	data, merr := json.Marshal(verr)
+	if merr != nil {
+		http.Error(w, merr.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	_, _ = w.Write(data)
 }
 
 // GenerateOpenAPI builds the OpenAPI 3.0 specification from all registered

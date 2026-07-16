@@ -55,9 +55,21 @@ func (r *Registry) SetWalker(w Walker) {
 	r.resolved = nil // invalidate cache so next Endpoints() call re-walks
 }
 
+// RegisterMeta records arbitrary endpoint metadata indexed by the handler's
+// function pointer. Path and Method are unknown at this point — they are
+// resolved later by walking the chi router tree.
+func (r *Registry) RegisterMeta(handler http.HandlerFunc, meta types.EndpointMeta) http.HandlerFunc {
+	meta.HandlerPtr = funcPtr(handler)
+	r.mu.Lock()
+	r.byPtr[meta.HandlerPtr] = &meta
+	r.resolved = nil // invalidate
+	r.mu.Unlock()
+	return handler
+}
+
 // RegisterRequestDTO records handler metadata indexed by the handler's function
-// pointer. Path and Method are unknown at this point — they are resolved later
-// by walking the chi router tree.
+// pointer. Kept as a positional-argument shorthand; RegisterMeta is the full
+// form used by the fluent swagger.Register API.
 func (r *Registry) RegisterRequestDTO(
 	handler http.HandlerFunc,
 	req any,
@@ -65,19 +77,12 @@ func (r *Registry) RegisterRequestDTO(
 	authType types.SecurityType,
 	tags []string,
 ) http.HandlerFunc {
-	ptr := funcPtr(handler)
-	meta := &types.EndpointMeta{
-		HandlerPtr:  ptr,
+	return r.RegisterMeta(handler, types.EndpointMeta{
 		RequestDTO:  req,
 		ResponseDTO: resp,
 		Security:    authType,
 		Tags:        tags,
-	}
-	r.mu.Lock()
-	r.byPtr[ptr] = meta
-	r.resolved = nil // invalidate
-	r.mu.Unlock()
-	return handler
+	})
 }
 
 // Endpoints resolves path+method for every registered handler by walking the

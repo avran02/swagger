@@ -155,6 +155,139 @@ func TestMarshalYAML_SpecialCharacters(t *testing.T) {
 	}
 }
 
+type apiError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func TestBuild_ErrorSchemaAndDocument422(t *testing.T) {
+	t.Parallel()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	noDTOH := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	reg := registry.NewRegistry()
+	reg.RegisterRequestDTO(h, createReq{}, createResp{}, types.Bearer, []string{"T"})
+	reg.RegisterRequestDTO(noDTOH, nil, nil, types.Public, []string{"T"})
+	reg.SetWalker(func(fn registry.WalkFunc) error {
+		if err := fn("POST", "/things", h); err != nil {
+			return err
+		}
+		return fn("GET", "/plain", noDTOH)
+	})
+
+	spec, err := builder.Build(reg, builder.Config{
+		Title: "T", Version: "1",
+		ErrorSchema: apiError{},
+		Document422: true,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	op := spec.Paths["/things"].Post
+	for _, code := range []string{"400", "401", "500"} {
+		resp := op.Responses[code]
+		if resp == nil || resp.Content == nil {
+			t.Errorf("%s response must carry ErrorSchema content, got %+v", code, resp)
+			continue
+		}
+		s := resp.Content["application/json"].Schema
+		if s == nil || s.Ref != "#/components/schemas/builder_test.apiError" {
+			t.Errorf("%s schema = %+v, want $ref to apiError", code, s)
+		}
+	}
+
+	v := op.Responses["422"]
+	if v == nil || v.Content == nil {
+		t.Fatalf("422 response missing for endpoint with request DTO: %+v", v)
+	}
+	s := v.Content["application/json"].Schema
+	if s == nil || s.Ref != "#/components/schemas/binder.ValidationError" {
+		t.Errorf("422 schema = %+v, want $ref to binder.ValidationError", s)
+	}
+	if spec.Components.Schemas["binder.ValidationError"] == nil {
+		t.Error("binder.ValidationError component missing")
+	}
+
+	// Endpoint without request DTO must not get a 422.
+	if spec.Paths["/plain"].Get.Responses["422"] != nil {
+		t.Error("422 must not be documented for endpoints without a request DTO")
+	}
+}
+
+type goneError struct {
+	Reason string `json:"reason"`
+}
+
+func TestBuild_EndpointErrors_FallbackAndOverride(t *testing.T) {
+	t.Parallel()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	reg := registry.NewRegistry()
+	reg.RegisterMeta(h, types.EndpointMeta{
+		Security: types.Public,
+		Tags:     []string{"T"},
+		Errors: []types.ErrorSpec{
+			{Code: 409}, // description falls back to StatusText
+			{Code: 400, Description: "Custom bad request"},        // overrides the auto-generated 400
+			{Code: 410, Description: "Gone", Schema: goneError{}}, // per-code schema override
+		},
+	})
+	reg.SetWalker(func(fn registry.WalkFunc) error {
+		return fn("DELETE", "/things/{id}", h)
+	})
+
+	spec, err := builder.Build(reg, builder.Config{
+		Title: "T", Version: "1",
+		ErrorSchema: apiError{},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	op := spec.Paths["/things/{id}"].Delete
+
+	conflict := op.Responses["409"]
+	if conflict == nil || conflict.Description != "Conflict" {
+		t.Errorf("409 description must fall back to StatusText, got %+v", conflict)
+	}
+	if conflict != nil && conflict.Content["application/json"].Schema.Ref != "#/components/schemas/builder_test.apiError" {
+		t.Errorf("409 must use global ErrorSchema, got %+v", conflict.Content)
+	}
+
+	if bad := op.Responses["400"]; bad == nil || bad.Description != "Custom bad request" {
+		t.Errorf("declared 400 must override the auto response, got %+v", bad)
+	}
+
+	gone := op.Responses["410"]
+	if gone == nil || gone.Content["application/json"].Schema.Ref != "#/components/schemas/builder_test.goneError" {
+		t.Errorf("410 must use its own schema, got %+v", gone)
+	}
+}
+
+func TestBuild_NoErrorSchema_PlainResponses(t *testing.T) {
+	t.Parallel()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	reg := registry.NewRegistry()
+	reg.RegisterRequestDTO(h, createReq{}, nil, types.Public, []string{"T"})
+	reg.SetWalker(func(fn registry.WalkFunc) error {
+		return fn("POST", "/things", h)
+	})
+
+	spec, err := builder.Build(reg, builder.Config{Title: "T", Version: "1"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	op := spec.Paths["/things"].Post
+	if op.Responses["400"].Content != nil {
+		t.Error("without ErrorSchema the 400 response must have no content")
+	}
+	if op.Responses["422"] != nil {
+		t.Error("422 must not appear unless Document422 is set")
+	}
+}
+
 func TestBuild_ServersFromBasePath(t *testing.T) {
 	t.Parallel()
 

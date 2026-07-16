@@ -219,6 +219,94 @@ swagger.RegisterRequestDTO(ctrl.Create, dto.Req{}, dto.Resp{}, swagger.Bearer, "
 
 Bearer endpoints emit `security: [{bearerAuth: []}]` and a `401` response. The `bearerAuth` security scheme is included in `components/securitySchemes` automatically.
 
+## Error responses
+
+Every operation automatically gets `400`, `500` (and `401` for bearer endpoints) responses. To attach your API's error body to them, set `ErrorSchema` — no changes at registration call sites:
+
+```go
+type APIError struct {
+    Code    string `json:"code"    example:"not_found"`
+    Message string `json:"message"`
+}
+
+swagger.Config{
+    Title:       "My API",
+    Version:     "1.0.0",
+    ErrorSchema: dto.APIError{},
+}
+```
+
+The type is reflected like any response DTO and referenced via `$ref` from all auto-generated error responses.
+
+### Per-endpoint error codes — fluent API
+
+Not every endpoint returns a `409` or `404`. Declare endpoint-specific codes with the fluent `Register` builder — `.Handler()` returns the original handler, so chi and the pointer-based matching work exactly as before:
+
+```go
+r.Post("/", swagger.Register(ctrl.Create).
+    WithRequest(dto.CreateRequest{}).
+    WithResponse(dto.CreateResponse{}).
+    WithSecurity(swagger.Bearer).
+    WithTags("Quizzes").
+    WithSummary("Create a quiz").
+    WithError(http.StatusConflict, "Quiz already exists").      // uses Config.ErrorSchema
+    WithError(http.StatusNotFound, "Course not found").
+    WithErrorSchema(http.StatusGone, "Archived", dto.GoneError{}). // custom schema for this code
+    Handler())
+```
+
+Declared codes are added to the operation's responses (overriding the auto-generated one for the same code). In the handler, write the error with the matching helper:
+
+```go
+if exists {
+    swagger.WriteError(w, http.StatusConflict, dto.APIError{
+        Code:    "already_exists",
+        Message: "quiz already exists",
+    })
+    return
+}
+```
+
+`RegisterRequestDTO(handler, req, resp, security, tags...)` remains supported — it is a positional shorthand for the same builder, so both styles can be mixed freely during migration.
+
+## Validation errors — FastAPI-style 422
+
+`BindRequest` collects **all** binding failures and returns them as a `*swagger.ValidationError`. The `BindOr422` helper turns that into an automatic `422 Unprocessable Entity` response:
+
+```go
+func (c *ArticlesController) Create(w http.ResponseWriter, r *http.Request) {
+    var req dto.ArticleCreateRequest
+    if !swagger.BindOr422(w, r, &req) {
+        return // 422 with a JSON body has already been written
+    }
+    // req is fully populated here
+}
+```
+
+The 422 body matches FastAPI's format:
+
+```json
+{
+  "detail": [
+    {"loc": ["query", "page"], "msg": "strconv.ParseInt: parsing \"abc\": invalid syntax", "type": "int_parsing"},
+    {"loc": ["header", "X-Company-ID"], "msg": "...", "type": "int_parsing"}
+  ]
+}
+```
+
+Set `Document422: true` in the config to document the 422 response (with the `ValidationError` schema) for every operation that has a request DTO:
+
+```go
+swagger.Config{
+    Title:       "My API",
+    Version:     "1.0.0",
+    ErrorSchema: dto.APIError{},
+    Document422: true,
+}
+```
+
+If you need custom handling, call `BindRequest` yourself and use `errors.As` to get the `*swagger.ValidationError`, or `swagger.WriteValidationError(w, err)` to write the 422 manually.
+
 ## Serving the spec
 
 ```go

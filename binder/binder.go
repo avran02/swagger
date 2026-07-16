@@ -22,6 +22,56 @@ func SetURLParamFunc(fn func(r *http.Request, key string) string) {
 	chiURLParam = fn
 }
 
+// FieldError describes a single binding/validation failure in the same shape
+// FastAPI uses: loc identifies the source and parameter, e.g. ["query","page"]
+// or ["body"].
+type FieldError struct {
+	Loc  []string `json:"loc"`
+	Msg  string   `json:"msg"`
+	Type string   `json:"type"`
+}
+
+// ValidationError aggregates every binding failure of a request. It is the
+// error type returned by BindRequest and serialises to the FastAPI-style
+// {"detail": [...]} JSON body.
+type ValidationError struct {
+	Detail []FieldError `json:"detail"`
+}
+
+func (e *ValidationError) Error() string {
+	msgs := make([]string, len(e.Detail))
+	for i, d := range e.Detail {
+		msgs[i] = strings.Join(d.Loc, ".") + ": " + d.Msg
+	}
+	return "binder: " + strings.Join(msgs, "; ")
+}
+
+func (e *ValidationError) add(in, name string, fieldType reflect.Type, err error) {
+	e.Detail = append(e.Detail, FieldError{
+		Loc:  []string{in, name},
+		Msg:  err.Error(),
+		Type: errType(fieldType),
+	})
+}
+
+// errType maps a field's Go type to a FastAPI-style error type token.
+func errType(t reflect.Type) string {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		return "bool_parsing"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "int_parsing"
+	case reflect.Float32, reflect.Float64:
+		return "float_parsing"
+	default:
+		return "value_error"
+	}
+}
+
 // BindRequest populates dst from the incoming HTTP request using struct field tags:
 //
 //	json    – JSON request body (application/json)
@@ -31,6 +81,9 @@ func SetURLParamFunc(fn func(r *http.Request, key string) string) {
 //	cookie  – HTTP cookies
 //
 // dst must be a non-nil pointer to a struct.
+//
+// All binding failures are collected (not just the first one) and returned as
+// a *ValidationError.
 func BindRequest(r *http.Request, dst any) error {
 	if dst == nil {
 		return fmt.Errorf("binder: dst must not be nil")
@@ -45,14 +98,21 @@ func BindRequest(r *http.Request, dst any) error {
 		return fmt.Errorf("binder: dst must point to a struct")
 	}
 
+	verr := &ValidationError{}
+
 	if err := bindBody(r, dst, rv); err != nil {
-		return fmt.Errorf("binder: body: %w", err)
+		verr.Detail = append(verr.Detail, FieldError{
+			Loc:  []string{"body"},
+			Msg:  err.Error(),
+			Type: "json_invalid",
+		})
 	}
 
-	if err := bindNonBody(r, rv); err != nil {
-		return err
-	}
+	bindNonBody(r, rv, verr)
 
+	if len(verr.Detail) > 0 {
+		return verr
+	}
 	return nil
 }
 
@@ -77,8 +137,9 @@ func bindBody(r *http.Request, dst any, rv reflect.Value) error {
 	return nil
 }
 
-// bindNonBody fills query / path / header / cookie fields via reflect.
-func bindNonBody(r *http.Request, rv reflect.Value) error {
+// bindNonBody fills query / path / header / cookie fields via reflect,
+// appending every failure to verr.
+func bindNonBody(r *http.Request, rv reflect.Value, verr *ValidationError) {
 	rt := rv.Type()
 	for i := 0; i < rt.NumField(); i++ {
 		field := rt.Field(i)
@@ -90,26 +151,21 @@ func bindNonBody(r *http.Request, rv reflect.Value) error {
 
 		// Recurse into embedded / anonymous structs.
 		if field.Anonymous && field.Type.Kind() == reflect.Struct {
-			if err := bindNonBody(r, fv); err != nil {
-				return err
-			}
+			bindNonBody(r, fv, verr)
 			continue
 		}
 
-		if err := bindField(r, field, fv); err != nil {
-			return err
-		}
+		bindField(r, field, fv, verr)
 	}
-	return nil
 }
 
 // bindField fills a single struct field from whichever request sources its
 // tags name (query / path / header / cookie).
-func bindField(r *http.Request, field reflect.StructField, fv reflect.Value) error {
+func bindField(r *http.Request, field reflect.StructField, fv reflect.Value, verr *ValidationError) {
 	if tag, ok := field.Tag.Lookup("query"); ok {
 		key := parseTagName(tag)
 		if err := bindValue(fv, field, r.URL.Query().Get(key)); err != nil {
-			return fmt.Errorf("binder: query[%s]: %w", key, err)
+			verr.add("query", key, field.Type, err)
 		}
 	}
 
@@ -120,14 +176,14 @@ func bindField(r *http.Request, field reflect.StructField, fv reflect.Value) err
 			val = chiURLParam(r, key)
 		}
 		if err := bindValue(fv, field, val); err != nil {
-			return fmt.Errorf("binder: path[%s]: %w", key, err)
+			verr.add("path", key, field.Type, err)
 		}
 	}
 
 	if tag, ok := field.Tag.Lookup("header"); ok {
 		key := parseTagName(tag)
 		if err := bindValue(fv, field, r.Header.Get(key)); err != nil {
-			return fmt.Errorf("binder: header[%s]: %w", key, err)
+			verr.add("header", key, field.Type, err)
 		}
 	}
 
@@ -138,10 +194,9 @@ func bindField(r *http.Request, field reflect.StructField, fv reflect.Value) err
 			val = c.Value
 		}
 		if err := bindValue(fv, field, val); err != nil {
-			return fmt.Errorf("binder: cookie[%s]: %w", key, err)
+			verr.add("cookie", key, field.Type, err)
 		}
 	}
-	return nil
 }
 
 // bindValue sets fv from raw, falling back to the field's `default` tag when

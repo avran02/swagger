@@ -25,13 +25,16 @@ func main() {
 	ctrl := handler.NewFolderController()
 
 	routes := []route{
-		{"POST", "/folders", swagger.RegisterRequestDTO(
-			ctrl.Create,
-			dto.FolderCreateRequest{},
-			dto.FolderCreateResponse{},
-			swagger.Public,
-			"Folders",
-		)},
+		// Fluent registration: per-endpoint error codes attach the global
+		// ErrorSchema to exactly the operations that can return them.
+		{"POST", "/folders", swagger.Register(ctrl.Create).
+			WithRequest(dto.FolderCreateRequest{}).
+			WithResponse(dto.FolderCreateResponse{}).
+			WithSecurity(swagger.Public).
+			WithTags("Folders").
+			WithSummary("Create a folder").
+			WithError(http.StatusConflict, "Folder already exists").
+			Handler()},
 		{"GET", "/folders/{id}", swagger.RegisterRequestDTO(
 			ctrl.Get,
 			dto.FolderGetRequest{},
@@ -64,21 +67,7 @@ func main() {
 		return nil
 	})
 
-	// Serve the spec at /openapi.yaml
-	mux.HandleFunc("GET /openapi.yaml", swagger.ServeSpec(swagger.Config{
-		Title:   "Folders API",
-		Version: "1.0.0",
-	}))
-
-	mux.HandleFunc("GET /openapi.json", swagger.ServeSpecJSON(swagger.Config{
-		Title:   "Folders API",
-		Version: "1.0.0",
-	}))
-
-	// ---------------------------------------------------------------------------
-	// Print the spec to stdout on startup so it's visible in this demo.
-	// ---------------------------------------------------------------------------
-	yaml, err := swagger.GenerateOpenAPI(swagger.Config{
+	cfg := swagger.Config{
 		Title:   "Folders API",
 		Version: "1.0.0",
 		Servers: []swagger.Server{
@@ -86,7 +75,20 @@ func main() {
 			{URL: "https://api.staging.example.com/v1", Description: "Staging"},
 			{URL: "http://localhost:8080/v1", Description: "Local"},
 		},
-	})
+		// All auto-generated 400/401/500 responses carry this schema.
+		ErrorSchema: dto.APIError{},
+		// Handlers use swagger.BindOr422, so document the 422 response too.
+		Document422: true,
+	}
+
+	// Serve the spec at /openapi.yaml
+	mux.HandleFunc("GET /openapi.yaml", swagger.ServeSpec(cfg))
+	mux.HandleFunc("GET /openapi.json", swagger.ServeSpecJSON(cfg))
+
+	// ---------------------------------------------------------------------------
+	// Print the spec to stdout on startup so it's visible in this demo.
+	// ---------------------------------------------------------------------------
+	yaml, err := swagger.GenerateOpenAPI(cfg)
 	if err != nil {
 		log.Fatalf("generate openapi: %v", err)
 	}

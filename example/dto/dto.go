@@ -64,6 +64,13 @@ type FolderTreeResponse struct {
 	Items []*FolderTreeNodeResponse `json:"items"`
 }
 
+// APIError is the error body every endpoint returns for 4xx/5xx responses.
+// Wire it into the spec via swagger.Config{ErrorSchema: dto.APIError{}}.
+type APIError struct {
+	Code    string `json:"code"    example:"not_found"`
+	Message string `json:"message" example:"folder not found"`
+}
+
 // CreateUserRequest demonstrates mixed binding sources.
 type CreateUserRequest struct {
 	Name  string `json:"name"   example:"Alice"`

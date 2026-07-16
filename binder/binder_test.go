@@ -1,6 +1,7 @@
 package binder_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,6 +130,37 @@ func TestBindRequest_InvalidInt(t *testing.T) {
 	var dst bindTarget
 	if err := binder.BindRequest(r, &dst); err == nil {
 		t.Fatal("expected error for non-numeric depth, got nil")
+	}
+}
+
+func TestBindRequest_CollectsAllErrors(t *testing.T) {
+	t.Parallel()
+
+	r := httptest.NewRequest(http.MethodGet, "/items?depth=abc&force=notabool", nil)
+
+	var dst bindTarget
+	err := binder.BindRequest(r, &dst)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	var verr *binder.ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("error must be *ValidationError, got %T", err)
+	}
+	if len(verr.Detail) != 2 {
+		t.Fatalf("want 2 field errors, got %d: %+v", len(verr.Detail), verr.Detail)
+	}
+
+	byLoc := map[string]binder.FieldError{}
+	for _, d := range verr.Detail {
+		byLoc[strings.Join(d.Loc, ".")] = d
+	}
+	if d, ok := byLoc["query.depth"]; !ok || d.Type != "int_parsing" {
+		t.Errorf("query.depth error missing or wrong type: %+v", d)
+	}
+	if d, ok := byLoc["query.force"]; !ok || d.Type != "bool_parsing" {
+		t.Errorf("query.force error missing or wrong type: %+v", d)
 	}
 }
 
