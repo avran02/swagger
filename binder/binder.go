@@ -96,47 +96,64 @@ func bindNonBody(r *http.Request, rv reflect.Value) error {
 			continue
 		}
 
-		if tag, ok := field.Tag.Lookup("query"); ok {
-			key, _ := parseTag(tag)
-			if val := r.URL.Query().Get(key); val != "" {
-				if err := setField(fv, val); err != nil {
-					return fmt.Errorf("binder: query[%s]: %w", key, err)
-				}
-			}
-		}
-
-		if tag, ok := field.Tag.Lookup("path"); ok {
-			key, _ := parseTag(tag)
-			val := ""
-			if chiURLParam != nil {
-				val = chiURLParam(r, key)
-			}
-			if val != "" {
-				if err := setField(fv, val); err != nil {
-					return fmt.Errorf("binder: path[%s]: %w", key, err)
-				}
-			}
-		}
-
-		if tag, ok := field.Tag.Lookup("header"); ok {
-			key, _ := parseTag(tag)
-			if val := r.Header.Get(key); val != "" {
-				if err := setField(fv, val); err != nil {
-					return fmt.Errorf("binder: header[%s]: %w", key, err)
-				}
-			}
-		}
-
-		if tag, ok := field.Tag.Lookup("cookie"); ok {
-			key, _ := parseTag(tag)
-			if c, err := r.Cookie(key); err == nil {
-				if err := setField(fv, c.Value); err != nil {
-					return fmt.Errorf("binder: cookie[%s]: %w", key, err)
-				}
-			}
+		if err := bindField(r, field, fv); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// bindField fills a single struct field from whichever request sources its
+// tags name (query / path / header / cookie).
+func bindField(r *http.Request, field reflect.StructField, fv reflect.Value) error {
+	if tag, ok := field.Tag.Lookup("query"); ok {
+		key := parseTagName(tag)
+		if err := bindValue(fv, field, r.URL.Query().Get(key)); err != nil {
+			return fmt.Errorf("binder: query[%s]: %w", key, err)
+		}
+	}
+
+	if tag, ok := field.Tag.Lookup("path"); ok {
+		key := parseTagName(tag)
+		val := ""
+		if chiURLParam != nil {
+			val = chiURLParam(r, key)
+		}
+		if err := bindValue(fv, field, val); err != nil {
+			return fmt.Errorf("binder: path[%s]: %w", key, err)
+		}
+	}
+
+	if tag, ok := field.Tag.Lookup("header"); ok {
+		key := parseTagName(tag)
+		if err := bindValue(fv, field, r.Header.Get(key)); err != nil {
+			return fmt.Errorf("binder: header[%s]: %w", key, err)
+		}
+	}
+
+	if tag, ok := field.Tag.Lookup("cookie"); ok {
+		key := parseTagName(tag)
+		val := ""
+		if c, err := r.Cookie(key); err == nil {
+			val = c.Value
+		}
+		if err := bindValue(fv, field, val); err != nil {
+			return fmt.Errorf("binder: cookie[%s]: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// bindValue sets fv from raw, falling back to the field's `default` tag when
+// the request carries no value. A field with neither stays untouched.
+func bindValue(fv reflect.Value, field reflect.StructField, raw string) error {
+	if raw == "" {
+		raw = field.Tag.Get("default")
+	}
+	if raw == "" {
+		return nil
+	}
+	return setField(fv, raw)
 }
 
 // setField converts the string value to the appropriate Go type and sets it.
@@ -199,13 +216,8 @@ func hasTag(t reflect.Type, tagName string) bool {
 	return false
 }
 
-// parseTag splits "name,option1,option2" and returns the name and raw options.
-func parseTag(tag string) (string, string) {
+// parseTagName extracts the name part of a "name,option1,option2" tag value.
+func parseTagName(tag string) string {
 	parts := strings.SplitN(tag, ",", 2)
-	name := strings.TrimSpace(parts[0])
-	opts := ""
-	if len(parts) == 2 {
-		opts = parts[1]
-	}
-	return name, opts
+	return strings.TrimSpace(parts[0])
 }

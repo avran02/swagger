@@ -27,10 +27,10 @@ Path and method come from chi — one source of truth, no duplication, no drift.
 ## Installation
 
 ```bash
-go get github.com/your-org/goswagger
+go get github.com/avran02/swagger
 ```
 
-Requires Go 1.22+. No external dependencies beyond chi itself.
+Requires Go 1.22+. The only dependency is `gopkg.in/yaml.v3` (for YAML serialisation); the router (chi) is injected by your code and never imported by the library.
 
 ## Quick start
 
@@ -151,7 +151,7 @@ These tags control how the field appears in the generated spec:
 | Tag | Effect |
 |---|---|
 | `required:"false"` | Marks the parameter as optional (non-pointer fields are required by default) |
-| `default:"value"` | Sets the default value in the schema |
+| `default:"value"` | Sets the default value in the schema; `BindRequest` also applies it when the parameter is missing from the request |
 | `example:"value"` | Sets the example value |
 | `description:"text"` | Sets the field description |
 | `enum:"a,b,c"` | Restricts allowed values |
@@ -177,6 +177,16 @@ Pointer fields (`*T`) are always optional and nullable — no tag needed.
 | `map[K]V` | `object` with `additionalProperties` |
 
 Recursive types (e.g. tree nodes that reference themselves) are handled correctly via `$ref`.
+
+When a field pointing to a named struct carries per-field annotations (`example`, `description`, nullability from `*T`, …), the `$ref` is wrapped in `allOf` — OpenAPI 3.0 ignores sibling fields placed next to a bare `$ref`.
+
+### Binder limitations
+
+`BindRequest` covers strings, bools, ints, uints and floats (plus pointers to them). Not supported yet:
+
+- slice parameters (`?tag=a&tag=b`) — only the first value is read;
+- `time.Time` in query/path/header/cookie parameters (fine in JSON bodies);
+- distinguishing an explicitly empty parameter (`?q=`) from an absent one — both fall back to `default` or leave the field untouched.
 
 ### Full example DTO
 
@@ -278,14 +288,19 @@ swagger/
 ├── registry/           stores metadata by handler pointer; resolves path+method via chi.Walk
 ├── binder/             BindRequest — fills structs from request by tag (json/query/path/header/cookie)
 ├── schema/             reflects Go types → OpenAPI Schema + Parameter objects
-└── builder/            assembles OpenAPISpec from registry + schema generator; custom YAML serialiser
+└── builder/            assembles OpenAPISpec from registry + schema generator
 ```
 
-Zero non-stdlib dependencies. The YAML serialiser is built in — no `gopkg.in/yaml.v3` required.
+The only dependency is `gopkg.in/yaml.v3` for YAML serialisation.
 
 ## Notes
 
-**Function pointer matching.** `RegisterRequestDTO` keys metadata by `reflect.ValueOf(handler).Pointer()`. This works correctly for named functions and methods on structs (the typical case). Avoid registering anonymous closures that capture different variables under the same pointer — use named controller methods instead.
+**Function pointer matching.** `RegisterRequestDTO` keys metadata by `reflect.ValueOf(handler).Pointer()`. This is the *code* pointer, and it has two consequences:
+
+- Anonymous closures created from the same function literal share one pointer — avoid registering them, use named controller methods.
+- Method values on **different instances of the same type** (`ctrlA.Create` and `ctrlB.Create`) also share one pointer. Registering both silently overwrites the first registration. If you run several instances of one controller type, give each route its own named handler function.
+
+**Routers without Walk.** Any router works as long as you can enumerate its routes. With `http.ServeMux` keep a slice of `{method, pattern, handler}` and replay it in the walker — see [example/main.go](example/main.go).
 
 **Call order.** `SetRouter` must be called after all routes are mounted. `GenerateOpenAPI` (and `ServeSpec`) can be called any number of times after that — the Walk result is cached and only re-computed when new handlers are registered.
 

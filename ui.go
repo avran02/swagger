@@ -94,7 +94,8 @@ func ServeUI(uiCfg UIConfig) http.HandlerFunc {
 func MountDocs(r interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
 	Handle(pattern string, handler http.Handler)
-}, prefix string, specCfg Config, uiCfg UIConfig) {
+}, prefix string, specCfg Config, uiCfg UIConfig,
+) {
 	prefix = strings.TrimRight(prefix, "/")
 
 	if uiCfg.SpecURL == "" {
@@ -208,13 +209,13 @@ func renderUIHTML(c UIConfig) string {
 	data := uiTemplateData{
 		Title:                        title,
 		CDN:                          c.CDN,
-		SpecURLJSON:                  template.JS(jsonString(c.SpecURL)),
-		DeepLinkingJSON:              template.JS(jsonBool(*c.DeepLinking)),
-		FilterJSON:                   template.JS(jsonBool(*c.Filter)),
-		TryItOutEnabledJSON:          template.JS(jsonBool(*c.TryItOutEnabled)),
-		PersistAuthorizationJSON:     template.JS(jsonBool(*c.PersistAuthorization)),
-		DefaultModelsExpandDepthJSON: template.JS(fmt.Sprintf("%d", *c.DefaultModelsExpandDepth)),
-		DocExpansionJSON:             template.JS(jsonString(c.DocExpansion)),
+		SpecURLJSON:                  js(jsonString(c.SpecURL)),
+		DeepLinkingJSON:              js(jsonBool(*c.DeepLinking)),
+		FilterJSON:                   js(jsonBool(*c.Filter)),
+		TryItOutEnabledJSON:          js(jsonBool(*c.TryItOutEnabled)),
+		PersistAuthorizationJSON:     js(jsonBool(*c.PersistAuthorization)),
+		DefaultModelsExpandDepthJSON: js(fmt.Sprintf("%d", *c.DefaultModelsExpandDepth)),
+		DocExpansionJSON:             js(jsonString(c.DocExpansion)),
 	}
 
 	var sb strings.Builder
@@ -224,6 +225,11 @@ func renderUIHTML(c UIConfig) string {
 	}
 	return sb.String()
 }
+
+// js marks a pre-encoded JSON literal as safe for the HTML template.
+// Every value passed here is developer-supplied UIConfig, encoded by
+// jsonString/jsonBool — never end-user input.
+func js(s string) template.JS { return template.JS(s) } //nolint:gosec
 
 func jsonString(s string) string {
 	// Minimal JSON string encoding — only characters that appear in URLs/keywords.

@@ -46,7 +46,7 @@ type FolderListResponse struct {
 
 // FolderTreeRequest demonstrates required:"false", default and description tags.
 type FolderTreeRequest struct {
-	CompanyID int64  `header:"X-Company-ID" required:"false" default:"0"  description:"Ignore IT! Unimplemented yet! Always uses default value"`
+	CompanyID int64  `header:"X-Company-ID" required:"false" default:"0"  description:"Company scope. Defaults to 0 when the header is absent"`
 	RootID    *int64 `query:"root"          required:"false"               description:"ID of the root folder. Use 0 for the full company tree"`
 	Depth     int    `query:"depth"         required:"false" default:"4"   description:"Maximum depth of the tree. 0 = maximum=32"`
 }

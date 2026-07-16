@@ -104,9 +104,8 @@ func (r *Registry) Endpoints() ([]types.EndpointMeta, error) {
 
 	// Walk the chi router to resolve path + method for each registered handler.
 	matched := make(map[uintptr]bool)
-	var walkErr error
 
-	walkErr = r.walker(func(method, route string, handler http.Handler, _ ...func(http.Handler) http.Handler) error {
+	walkErr := r.walker(func(method, route string, handler http.Handler, _ ...func(http.Handler) http.Handler) error {
 		ptr := handlerPtr(handler)
 		if meta, ok := r.byPtr[ptr]; ok {
 			// Clone and fill in path + method.

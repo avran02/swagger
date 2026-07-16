@@ -251,7 +251,11 @@ func operationID(method, path string) string {
 	method = strings.ToLower(method)
 	// Remove leading slash, replace slashes and braces.
 	p := strings.TrimPrefix(path, "/")
-	p = reChiParam.ReplaceAllString(p, `By$1`)
+	// {id} → ById (capitalised so the final ID is camelCase, not "Byid").
+	p = reChiParam.ReplaceAllStringFunc(p, func(m string) string {
+		name := reChiParam.FindStringSubmatch(m)[1]
+		return "By" + strings.ToUpper(name[:1]) + name[1:]
+	})
 	parts := strings.FieldsFunc(p, func(r rune) bool {
 		return r == '/' || r == '-' || r == '_'
 	})

@@ -4,44 +4,65 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	swagger "github.com/avran02/swagger"
 	"github.com/avran02/swagger/example/dto"
 	"github.com/avran02/swagger/example/handler"
+	"github.com/avran02/swagger/registry"
 )
+
+// route pairs a method+pattern with its handler so the same slice can drive
+// both ServeMux registration and the swagger walker. With chi you don't need
+// this — chi.Walk plays the same role (see README).
+type route struct {
+	method  string
+	pattern string
+	handler http.HandlerFunc
+}
 
 func main() {
 	ctrl := handler.NewFolderController()
 
-	// ---------------------------------------------------------------------------
-	// Route registration — path and method are explicit so the spec builder knows
-	// them at registration time without any router introspection.
-	// ---------------------------------------------------------------------------
+	routes := []route{
+		{"POST", "/folders", swagger.RegisterRequestDTO(
+			ctrl.Create,
+			dto.FolderCreateRequest{},
+			dto.FolderCreateResponse{},
+			swagger.Public,
+			"Folders",
+		)},
+		{"GET", "/folders/{id}", swagger.RegisterRequestDTO(
+			ctrl.Get,
+			dto.FolderGetRequest{},
+			dto.FolderGetResponse{},
+			swagger.Bearer,
+			"Folders",
+		)},
+		{"GET", "/folders", swagger.RegisterRequestDTO(
+			ctrl.List,
+			dto.FolderListRequest{},
+			dto.FolderListResponse{},
+			swagger.Bearer,
+			"Folders",
+		)},
+	}
+
 	mux := http.NewServeMux()
+	for _, rt := range routes {
+		mux.HandleFunc(rt.method+" "+rt.pattern, rt.handler)
+	}
 
-	mux.HandleFunc("POST /folders", swagger.RegisterRequestDTO(
-		ctrl.Create,
-		dto.FolderCreateRequest{},
-		dto.FolderCreateResponse{},
-		swagger.Public,
-		"Folders",
-	))
-
-	mux.HandleFunc("GET /folders/{id}", swagger.RegisterRequestDTO(
-		ctrl.Get,
-		dto.FolderGetRequest{},
-		dto.FolderGetResponse{},
-		swagger.Bearer,
-		"Folders",
-	))
-
-	mux.HandleFunc("GET /folders", swagger.RegisterRequestDTO(
-		ctrl.List,
-		dto.FolderListRequest{},
-		dto.FolderListResponse{},
-		swagger.Bearer,
-		"Folders",
-	))
+	// ServeMux has no equivalent of chi.Walk, so the walker simply replays the
+	// routes slice. This resolves path+method for every registered handler.
+	swagger.SetRouter(func(fn registry.WalkFunc) error {
+		for _, rt := range routes {
+			if err := fn(rt.method, rt.pattern, rt.handler); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 
 	// Serve the spec at /openapi.yaml
 	mux.HandleFunc("GET /openapi.yaml", swagger.ServeSpec(swagger.Config{
@@ -71,6 +92,11 @@ func main() {
 	}
 	fmt.Println(string(yaml))
 
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	log.Println("Listening on :8080")
-	log.Fatal(http.ListenAndServe(":8081", mux))
+	log.Fatal(srv.ListenAndServe())
 }

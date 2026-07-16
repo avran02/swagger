@@ -19,6 +19,7 @@ type Schema struct {
 	Example              any                `yaml:"example,omitempty" json:"example,omitempty"`
 	Default              any                `yaml:"default,omitempty" json:"default,omitempty"`
 	Ref                  string             `yaml:"$ref,omitempty" json:"$ref,omitempty"`
+	AllOf                []*Schema          `yaml:"allOf,omitempty" json:"allOf,omitempty"`
 	Nullable             bool               `yaml:"nullable,omitempty" json:"nullable,omitempty"`
 	AdditionalProperties *Schema            `yaml:"additionalProperties,omitempty" json:"additionalProperties,omitempty"`
 	Description          string             `yaml:"description,omitempty" json:"description,omitempty"`
@@ -50,9 +51,22 @@ func (g *Generator) SchemaForType(t reflect.Type) *Schema {
 
 	s := g.buildSchema(t)
 	if nullable && s != nil {
+		s = overrideTarget(s)
 		s.Nullable = true
 	}
 	return s
+}
+
+// overrideTarget returns a schema that per-field annotations can safely be
+// applied to. Plain schemas are cloned so shared component schemas are never
+// mutated. $ref schemas are wrapped in allOf, because OpenAPI 3.0 ignores any
+// sibling field placed next to $ref.
+func overrideTarget(s *Schema) *Schema {
+	if s.Ref != "" {
+		return &Schema{AllOf: []*Schema{{Ref: s.Ref}}}
+	}
+	clone := *s
+	return &clone
 }
 
 func (g *Generator) buildSchema(t reflect.Type) *Schema {
@@ -92,7 +106,8 @@ func (g *Generator) buildSchema(t reflect.Type) *Schema {
 			nullable = true
 		}
 		itemSchema := g.buildSchema(elemType)
-		if nullable && itemSchema.Ref == "" {
+		if nullable {
+			itemSchema = overrideTarget(itemSchema)
 			itemSchema.Nullable = true
 		}
 		return &Schema{Type: "array", Items: itemSchema}
@@ -164,7 +179,7 @@ func (g *Generator) structSchema(t reflect.Type) *Schema {
 		isPointer := field.Type.Kind() == reflect.Ptr
 		omitempty := strings.Contains(jsonOpts, "omitempty")
 		requiredTag, hasRequiredTag := field.Tag.Lookup("required")
-		explicitlyOptional := hasRequiredTag && strings.ToLower(strings.TrimSpace(requiredTag)) == "false"
+		explicitlyOptional := hasRequiredTag && tagFalse(requiredTag)
 
 		if !omitempty && !isPointer && !explicitlyOptional {
 			required = append(required, jsonName)
@@ -205,7 +220,7 @@ func (g *Generator) structSchemaInline(t reflect.Type) *Schema {
 		isPointer := field.Type.Kind() == reflect.Ptr
 		omitempty := strings.Contains(jsonOpts, "omitempty")
 		requiredTag, hasRequiredTag := field.Tag.Lookup("required")
-		explicitlyOptional := hasRequiredTag && strings.ToLower(strings.TrimSpace(requiredTag)) == "false"
+		explicitlyOptional := hasRequiredTag && tagFalse(requiredTag)
 
 		if !omitempty && !isPointer && !explicitlyOptional {
 			required = append(required, jsonName)
@@ -242,50 +257,39 @@ func (g *Generator) fieldSchema(field reflect.StructField) *Schema {
 		s = &Schema{}
 	}
 
-	if nullable {
-		// Clone so we don't mutate the shared component schema.
-		clone := *s
-		clone.Nullable = true
-		s = &clone
+	// Collect per-field annotations. If any are present (or the field is a
+	// pointer), switch to a safe override target: a clone for plain schemas,
+	// an allOf wrapper for $ref schemas (OpenAPI 3.0 ignores $ref siblings).
+	hasOverride := nullable
+	for _, tag := range []string{"example", "default", "format", "enum", "description"} {
+		if _, ok := field.Tag.Lookup(tag); ok {
+			hasOverride = true
+			break
+		}
+	}
+	if !hasOverride {
+		return s
 	}
 
-	// Apply tag overrides. When the schema is a bare $ref we must clone first
-	// so that per-field annotations don't bleed into the shared component.
+	s = overrideTarget(s)
+	if nullable {
+		s.Nullable = true
+	}
 	if v, ok := field.Tag.Lookup("example"); ok {
-		if s.Ref != "" {
-			c := *s
-			s = &c
-		}
 		s.Example = v
 	}
 	if v, ok := field.Tag.Lookup("default"); ok {
-		if s.Ref != "" {
-			c := *s
-			s = &c
-		}
 		s.Default = v
 	}
 	if v, ok := field.Tag.Lookup("format"); ok {
-		if s.Ref != "" {
-			c := *s
-			s = &c
-		}
 		s.Format = v
 	}
 	if v, ok := field.Tag.Lookup("enum"); ok {
-		if s.Ref != "" {
-			c := *s
-			s = &c
-		}
 		for _, e := range strings.Split(v, ",") {
 			s.Enum = append(s.Enum, strings.TrimSpace(e))
 		}
 	}
 	if v, ok := field.Tag.Lookup("description"); ok {
-		if s.Ref != "" {
-			c := *s
-			s = &c
-		}
 		s.Description = v
 	}
 
@@ -324,65 +328,71 @@ func (g *Generator) collectParameters(t reflect.Type) []Parameter {
 			}
 		}
 
-		sources := []struct {
-			tag string
-			in  string
-		}{
-			{"query", "query"},
-			{"path", "path"},
-			{"header", "header"},
-			{"cookie", "cookie"},
-		}
-
-		for _, src := range sources {
-			tag, ok := field.Tag.Lookup(src.tag)
-			if !ok {
-				continue
-			}
-			name, _ := splitTag(tag)
-			if name == "" || name == "-" {
-				continue
-			}
-
-			// required resolution:
-			//   path params are always required.
-			//   others: required unless pointer type, or required:"false" explicitly set.
-			isPointer := field.Type.Kind() == reflect.Ptr
-			requiredTag, hasRequiredTag := field.Tag.Lookup("required")
-			var required bool
-			if src.in == "path" {
-				required = true
-			} else if hasRequiredTag {
-				required = strings.ToLower(strings.TrimSpace(requiredTag)) != "false"
-			} else {
-				required = !isPointer
-			}
-
-			paramSchema := g.buildSchema(field.Type)
-
-			// Attach default to the schema when present.
-			if defVal, ok := field.Tag.Lookup("default"); ok {
-				clone := *paramSchema
-				clone.Default = defVal
-				paramSchema = &clone
-			}
-
-			p := Parameter{
-				Name:     name,
-				In:       src.in,
-				Required: required,
-				Schema:   paramSchema,
-			}
-			if v, ok := field.Tag.Lookup("example"); ok {
-				p.Example = v
-			}
-			if v, ok := field.Tag.Lookup("description"); ok {
-				p.Description = v
-			}
-			params = append(params, p)
-		}
+		params = append(params, g.fieldParameters(field)...)
 	}
 	return params
+}
+
+// paramSources maps binding tags to their OpenAPI parameter location.
+var paramSources = []struct {
+	tag string
+	in  string
+}{
+	{"query", "query"},
+	{"path", "path"},
+	{"header", "header"},
+	{"cookie", "cookie"},
+}
+
+// fieldParameters builds the Parameter objects a single struct field
+// contributes (one per binding tag present on the field).
+func (g *Generator) fieldParameters(field reflect.StructField) []Parameter {
+	var params []Parameter
+	for _, src := range paramSources {
+		tag, ok := field.Tag.Lookup(src.tag)
+		if !ok {
+			continue
+		}
+		name, _ := splitTag(tag)
+		if name == "" || name == "-" {
+			continue
+		}
+
+		paramSchema := g.buildSchema(field.Type)
+
+		// Attach default to the schema when present.
+		if defVal, ok := field.Tag.Lookup("default"); ok {
+			paramSchema = overrideTarget(paramSchema)
+			paramSchema.Default = defVal
+		}
+
+		p := Parameter{
+			Name:     name,
+			In:       src.in,
+			Required: paramRequired(field, src.in),
+			Schema:   paramSchema,
+		}
+		if v, ok := field.Tag.Lookup("example"); ok {
+			p.Example = v
+		}
+		if v, ok := field.Tag.Lookup("description"); ok {
+			p.Description = v
+		}
+		params = append(params, p)
+	}
+	return params
+}
+
+// paramRequired resolves the required flag: path params are always required;
+// others are required unless the field is a pointer or carries required:"false".
+func paramRequired(field reflect.StructField, in string) bool {
+	if in == "path" {
+		return true
+	}
+	if requiredTag, ok := field.Tag.Lookup("required"); ok {
+		return !tagFalse(requiredTag)
+	}
+	return field.Type.Kind() != reflect.Ptr
 }
 
 // Parameter represents an OpenAPI Parameter Object.
@@ -416,6 +426,11 @@ func intSchema(t reflect.Type) *Schema {
 	default:
 		return &Schema{Type: "integer", Format: "int64"}
 	}
+}
+
+// tagFalse reports whether a tag value is the literal "false".
+func tagFalse(v string) bool {
+	return strings.ToLower(strings.TrimSpace(v)) == "false"
 }
 
 func splitTag(tag string) (string, string) {

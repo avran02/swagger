@@ -21,9 +21,11 @@ const (
 	Bearer SecurityType = types.Bearer
 )
 
-// Config is re-exported for convenience.
-type Config = builder.Config
-type Server = builder.Server
+// Config and Server are re-exported for convenience.
+type (
+	Config = builder.Config
+	Server = builder.Server
+)
 
 // DefaultConfig returns sensible spec metadata defaults.
 func DefaultConfig() Config { return builder.DefaultConfig() }
@@ -121,7 +123,7 @@ func ServeSpec(cfg ...Config) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/x-yaml; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		w.Write(data) //nolint:errcheck
+		_, _ = w.Write(data)
 	}
 }
 
@@ -135,6 +137,6 @@ func ServeSpecJSON(cfg ...Config) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		w.Write(data) //nolint:errcheck
+		_, _ = w.Write(data)
 	}
 }

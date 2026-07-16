@@ -12,13 +12,13 @@ func NewFolderController() *FolderController {
 type FolderController struct{}
 
 func (c *FolderController) Create(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Create folder")
+	_, _ = fmt.Fprintln(w, "Create folder")
 }
 
 func (c *FolderController) Get(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Get folder")
+	_, _ = fmt.Fprintln(w, "Get folder")
 }
 
 func (c *FolderController) List(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "List folders")
+	_, _ = fmt.Fprintln(w, "List folders")
 }
