@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -88,12 +89,14 @@ type fieldPlan struct {
 	errType  string
 	set      setterFunc
 	required bool
+	file     bool
 }
 
 // structPlan holds everything BindRequest needs to know about a DTO type,
 // computed once via reflection and reused for every request.
 type structPlan struct {
 	hasJSON bool
+	hasForm bool
 	fields  []fieldPlan
 }
 
@@ -155,16 +158,24 @@ func compileFields(t reflect.Type, index []int, p *structPlan) {
 
 		set := compileSetter(field.Type)
 		et := errType(field.Type)
-		for _, source := range [...]string{"query", "path", "header", "cookie"} {
+		for _, source := range [...]string{"query", "path", "header", "cookie", "form", "multipart"} {
 			if tag, ok := field.Tag.Lookup(source); ok {
+				bindingSource := source
+				if source == "multipart" {
+					bindingSource = "form"
+				}
+				if bindingSource == "form" {
+					p.hasForm = true
+				}
 				p.fields = append(p.fields, fieldPlan{
 					index:    idx,
-					source:   source,
+					source:   bindingSource,
 					key:      parseTagName(tag),
 					def:      field.Tag.Get("default"),
 					errType:  et,
 					set:      set,
-					required: runtimeRequired(field, source),
+					required: runtimeRequired(field, bindingSource),
+					file:     isFileField(field.Type),
 				})
 			}
 		}
@@ -286,6 +297,18 @@ func BindRequest(r *http.Request, dst any) error {
 // bindBody decodes the JSON body into dst when the Content-Type is
 // application/json AND the struct has at least one `json` tag.
 func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr *ValidationError) error {
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		return bindMultipart(r, rv, plan, verr)
+	}
+	if plan.hasForm {
+		for i := range plan.fields {
+			f := &plan.fields[i]
+			if f.source == "form" && f.required {
+				verr.add("body", f.key, "missing", fmt.Errorf("Field required"))
+			}
+		}
+		return nil
+	}
 	if !plan.hasJSON {
 		return nil
 	}
@@ -317,6 +340,9 @@ func bindNonBody(r *http.Request, rv reflect.Value, plan *structPlan, verr *Vali
 
 	for i := range plan.fields {
 		f := &plan.fields[i]
+		if f.source == "form" {
+			continue
+		}
 
 		raw := ""
 		present := false
@@ -368,12 +394,76 @@ func bindNonBody(r *http.Request, rv reflect.Value, plan *structPlan, verr *Vali
 	}
 }
 
+func bindMultipart(r *http.Request, rv reflect.Value, plan *structPlan, verr *ValidationError) error {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		return err
+	}
+	for i := range plan.fields {
+		f := &plan.fields[i]
+		if f.source != "form" {
+			continue
+		}
+		fv := rv.FieldByIndex(f.index)
+		if f.file {
+			files := r.MultipartForm.File[f.key]
+			if len(files) == 0 {
+				if f.required {
+					verr.add("body", f.key, "missing", fmt.Errorf("Field required"))
+				}
+				continue
+			}
+			setFiles(fv, files)
+			continue
+		}
+		values, present := r.MultipartForm.Value[f.key]
+		raw := ""
+		if present && len(values) > 0 {
+			raw = values[0]
+		} else {
+			present = false
+		}
+		if !present && f.def != "" {
+			raw, present = f.def, true
+		}
+		if !present {
+			if f.required {
+				verr.add("body", f.key, "missing", fmt.Errorf("Field required"))
+			}
+			continue
+		}
+		if err := f.set(fv, raw); err != nil {
+			verr.add("body", f.key, f.errType, err)
+		}
+	}
+	return nil
+}
+
+func isFileField(t reflect.Type) bool {
+	if t == reflect.PointerTo(multipartFileHeaderType) {
+		return true
+	}
+	return t.Kind() == reflect.Slice && t.Elem() == reflect.PointerTo(multipartFileHeaderType)
+}
+
+var multipartFileHeaderType = reflect.TypeOf(multipart.FileHeader{})
+
+func setFiles(dst reflect.Value, files []*multipart.FileHeader) {
+	if dst.Kind() == reflect.Ptr {
+		dst.Set(reflect.ValueOf(files[0]))
+		return
+	}
+	dst.Set(reflect.ValueOf(files))
+}
+
 func runtimeRequired(field reflect.StructField, source string) bool {
 	if source == "path" {
 		return true
 	}
 	if v, ok := field.Tag.Lookup("required"); ok {
 		return !strings.EqualFold(strings.TrimSpace(v), "false")
+	}
+	if source == "form" {
+		return field.Type.Kind() != reflect.Ptr && field.Type.Kind() != reflect.Slice
 	}
 	return field.Type.Kind() != reflect.Ptr
 }

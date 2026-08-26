@@ -1,12 +1,14 @@
 package schema
 
 import (
+	"mime/multipart"
 	"reflect"
 	"strings"
 	"time"
 )
 
 var timeType = reflect.TypeOf(time.Time{})
+var fileHeaderType = reflect.TypeOf(multipart.FileHeader{})
 
 // Schema represents an OpenAPI 3.0 Schema Object.
 type Schema struct {
@@ -79,6 +81,9 @@ func (g *Generator) buildSchema(t reflect.Type) *Schema {
 	if t == timeType {
 		return &Schema{Type: "string", Format: "date-time"}
 	}
+	if t == fileHeaderType {
+		return &Schema{Type: "string", Format: "binary"}
+	}
 
 	switch t.Kind() {
 	case reflect.String:
@@ -120,6 +125,72 @@ func (g *Generator) buildSchema(t reflect.Type) *Schema {
 	default:
 		return &Schema{Type: "string"}
 	}
+}
+
+// MultipartSchemaForType builds the object schema used by multipart/form-data.
+// Fields are selected through form or multipart tags.
+func (g *Generator) MultipartSchemaForType(t reflect.Type) *Schema {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	s := &Schema{Type: "object", Properties: make(map[string]*Schema)}
+	if t.Kind() != reflect.Struct {
+		return s
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if f.Anonymous {
+			embedded := g.MultipartSchemaForType(f.Type)
+			for k, v := range embedded.Properties {
+				s.Properties[k] = v
+			}
+			s.Required = append(s.Required, embedded.Required...)
+			continue
+		}
+		name := ""
+		if tag, ok := f.Tag.Lookup("form"); ok {
+			name, _ = splitTag(tag)
+		}
+		if name == "" {
+			if tag, ok := f.Tag.Lookup("multipart"); ok {
+				name, _ = splitTag(tag)
+			}
+		}
+		if name == "" || name == "-" {
+			continue
+		}
+		if isFileType(f.Type) {
+			s.Properties[name] = fileSchema(f.Type)
+		} else {
+			s.Properties[name] = g.SchemaForType(f.Type)
+		}
+		if paramRequired(f, "form") {
+			s.Required = append(s.Required, name)
+		}
+	}
+	s.Required = uniqueStrings(s.Required)
+	return s
+}
+
+func isFileType(t reflect.Type) bool {
+	if t.Kind() == reflect.Ptr {
+		return t.Elem() == fileHeaderType
+	}
+	if t.Kind() == reflect.Slice {
+		e := t.Elem()
+		return e == fileHeaderType || (e.Kind() == reflect.Ptr && e.Elem() == fileHeaderType)
+	}
+	return t == fileHeaderType
+}
+
+func fileSchema(t reflect.Type) *Schema {
+	if t.Kind() == reflect.Slice {
+		return &Schema{Type: "array", Items: &Schema{Type: "string", Format: "binary"}}
+	}
+	return &Schema{Type: "string", Format: "binary"}
 }
 
 // structSchema builds a full object schema for a struct type and registers it

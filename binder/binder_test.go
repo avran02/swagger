@@ -1,7 +1,9 @@
 package binder_test
 
 import (
+	"bytes"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,6 +179,7 @@ func TestBindRequest_NilAndNonPointer(t *testing.T) {
 		t.Error("expected error for non-pointer dst")
 	}
 }
+
 func TestBindRequest_MissingRequiredQueryAndJSON(t *testing.T) {
 	type request struct {
 		Search string `query:"search" required:"true"`
@@ -193,5 +196,27 @@ func TestBindRequest_MissingRequiredQueryAndJSON(t *testing.T) {
 	}
 	if len(verr.Detail) != 2 {
 		t.Fatalf("detail = %+v, want two missing fields", verr.Detail)
+	}
+}
+
+func TestBindRequest_MultipartFileAndValue(t *testing.T) {
+	type upload struct {
+		File *multipart.FileHeader `form:"file" required:"true"`
+		Name string                `form:"name" required:"true"`
+	}
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, _ := w.CreateFormFile("file", "hello.txt")
+	_, _ = part.Write([]byte("hello"))
+	_ = w.WriteField("name", "greeting")
+	_ = w.Close()
+	r := httptest.NewRequest(http.MethodPost, "/upload", &body)
+	r.Header.Set("Content-Type", w.FormDataContentType())
+	var dst upload
+	if err := binder.BindRequest(r, &dst); err != nil {
+		t.Fatalf("BindRequest: %v", err)
+	}
+	if dst.File == nil || dst.File.Filename != "hello.txt" || dst.Name != "greeting" {
+		t.Fatalf("dst = %+v", dst)
 	}
 }

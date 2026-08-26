@@ -22,6 +22,12 @@ type ErrorSpec struct {
 	Schema any
 }
 
+// ResponseHeaderSpec describes a response header in the generated OpenAPI spec.
+type ResponseHeaderSpec struct {
+	Description string
+	Example     string
+}
+
 // EndpointMeta holds all metadata for a registered endpoint.
 type EndpointMeta struct {
 	Path        string
@@ -29,8 +35,13 @@ type EndpointMeta struct {
 	Summary     string
 	RequestDTO  any
 	ResponseDTO any
-	Security    SecurityType
-	Tags        []string
-	Errors      []ErrorSpec
-	HandlerPtr  uintptr
+	// ResponseMediaTypes overrides application/json for the successful response.
+	ResponseMediaTypes []string
+	// BinaryResponse documents the successful response as string/binary.
+	BinaryResponse  bool
+	ResponseHeaders map[string]ResponseHeaderSpec
+	Security        SecurityType
+	Tags            []string
+	Errors          []ErrorSpec
+	HandlerPtr      uintptr
 }

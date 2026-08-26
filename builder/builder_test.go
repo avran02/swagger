@@ -1,6 +1,7 @@
 package builder_test
 
 import (
+	"mime/multipart"
 	"net/http"
 	"testing"
 
@@ -9,6 +10,44 @@ import (
 	"github.com/avran02/swagger/types"
 	"gopkg.in/yaml.v3"
 )
+
+type uploadReq struct {
+	File  *multipart.FileHeader   `form:"file" required:"true"`
+	Files []*multipart.FileHeader `form:"files" required:"false"`
+	Title string                  `form:"title" required:"true"`
+}
+
+func TestBuild_MultipartUploadAndBinaryDownload(t *testing.T) {
+	h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	reg := registry.NewRegistry()
+	reg.RegisterMeta(h, types.EndpointMeta{
+		RequestDTO: uploadReq{}, BinaryResponse: true,
+		ResponseMediaTypes: []string{"application/pdf", "application/zip"},
+		ResponseHeaders: map[string]types.ResponseHeaderSpec{
+			"Content-Disposition": {Description: "download", Example: `attachment; filename="report.pdf"`},
+		},
+	})
+	reg.SetWalker(func(fn registry.WalkFunc) error { return fn("POST", "/files", h) })
+	spec, err := builder.Build(reg, builder.Config{Title: "T", Version: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := spec.Paths["/files"].Post
+	mt := op.RequestBody.Content["multipart/form-data"]
+	if mt == nil || mt.Schema.Properties["file"].Format != "binary" {
+		t.Fatalf("multipart schema = %+v", mt)
+	}
+	if mt.Schema.Properties["files"].Items.Format != "binary" {
+		t.Fatalf("files schema = %+v", mt.Schema.Properties["files"])
+	}
+	resp := op.Responses["200"]
+	if resp.Content["application/pdf"].Schema.Format != "binary" || resp.Content["application/zip"] == nil {
+		t.Fatalf("response = %+v", resp)
+	}
+	if resp.Headers["Content-Disposition"].Example == nil {
+		t.Fatalf("headers = %+v", resp.Headers)
+	}
+}
 
 type createReq struct {
 	Name string `json:"name" example:"Alice"`

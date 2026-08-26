@@ -67,6 +67,13 @@ type MediaType struct {
 type Response struct {
 	Description string                `yaml:"description" json:"description"`
 	Content     map[string]*MediaType `yaml:"content,omitempty" json:"content,omitempty"`
+	Headers     map[string]*Header    `yaml:"headers,omitempty" json:"headers,omitempty"`
+}
+
+type Header struct {
+	Description string         `yaml:"description,omitempty" json:"description,omitempty"`
+	Schema      *schema.Schema `yaml:"schema,omitempty" json:"schema,omitempty"`
+	Example     any            `yaml:"example,omitempty" json:"example,omitempty"`
 }
 
 type Components struct {
@@ -198,8 +205,12 @@ func buildOperation(gen *schema.Generator, ep types.EndpointMeta, cfg Config) *O
 		params := gen.ParametersForType(rt)
 		op.Parameters = params
 
-		// Request body — only when the struct has json tags
-		if hasJSONFields(rt) && methodHasBody(ep.Method) {
+		// Multipart takes precedence when form fields are present.
+		if hasFormFields(rt) && methodHasBody(ep.Method) {
+			op.RequestBody = &RequestBody{Required: true, Content: map[string]*MediaType{
+				"multipart/form-data": {Schema: gen.MultipartSchemaForType(rt)},
+			}}
+		} else if hasJSONFields(rt) && methodHasBody(ep.Method) {
 			bodySchema := gen.SchemaForType(rt)
 			op.RequestBody = &RequestBody{
 				Required: true,
@@ -210,16 +221,30 @@ func buildOperation(gen *schema.Generator, ep types.EndpointMeta, cfg Config) *O
 		}
 	}
 
-	// 200 response from response DTO
-	if ep.ResponseDTO != nil {
-		rt := reflect.TypeOf(ep.ResponseDTO)
-		respSchema := gen.SchemaForType(rt)
-		op.Responses["200"] = &Response{
-			Description: "Success",
-			Content: map[string]*MediaType{
-				"application/json": {Schema: respSchema},
-			},
+	// Successful response, including explicitly documented binary downloads.
+	if ep.ResponseDTO != nil || ep.BinaryResponse {
+		respSchema := &schema.Schema{Type: "string", Format: "binary"}
+		if !ep.BinaryResponse {
+			respSchema = gen.SchemaForType(reflect.TypeOf(ep.ResponseDTO))
 		}
+		mediaTypes := ep.ResponseMediaTypes
+		if len(mediaTypes) == 0 {
+			mediaTypes = []string{"application/json"}
+		}
+		content := make(map[string]*MediaType, len(mediaTypes))
+		for _, mediaType := range mediaTypes {
+			if mediaType != "" {
+				content[mediaType] = &MediaType{Schema: respSchema}
+			}
+		}
+		resp := &Response{Description: "Success", Content: content}
+		if len(ep.ResponseHeaders) > 0 {
+			resp.Headers = make(map[string]*Header, len(ep.ResponseHeaders))
+			for name, h := range ep.ResponseHeaders {
+				resp.Headers[name] = &Header{Description: h.Description, Schema: &schema.Schema{Type: "string"}, Example: h.Example}
+			}
+		}
+		op.Responses["200"] = resp
 	} else {
 		op.Responses["204"] = &Response{Description: "No Content"}
 	}
@@ -345,6 +370,28 @@ func hasJSONFields(t reflect.Type) bool {
 			if hasJSONFields(f.Type) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func hasFormFields(t reflect.Type) bool {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if _, ok := f.Tag.Lookup("form"); ok {
+			return true
+		}
+		if _, ok := f.Tag.Lookup("multipart"); ok {
+			return true
+		}
+		if f.Anonymous && hasFormFields(f.Type) {
+			return true
 		}
 	}
 	return false

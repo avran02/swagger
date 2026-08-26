@@ -171,6 +171,39 @@ These tags control how the field appears in the generated spec:
 
 Pointer fields (`*T`) are always optional and nullable — no tag needed.
 
+### Multipart uploads
+
+Use `form` tags for `multipart/form-data`. File fields may be
+`*multipart.FileHeader` or `[]*multipart.FileHeader`; scalar form fields use the
+same conversions and `required`/`default` rules as query parameters.
+
+```go
+type UploadRequest struct {
+    File        *multipart.FileHeader   `form:"file" required:"true"`
+    Attachments []*multipart.FileHeader `form:"attachments" required:"false"`
+    Title       string                  `form:"title" required:"true"`
+}
+```
+
+`BindOr422` parses the multipart body and returns `422` for a missing required
+part. The generated request schema uses `format: binary` for file parts. The
+`multipart` tag is accepted as an alias for `form`.
+
+### Binary downloads
+
+Document streamed files with the fluent registration API:
+
+```go
+r.Get("/report", swagger.Register(downloadReport).
+    WithDownload("application/pdf", `attachment; filename="report.pdf"`).
+    Handler())
+```
+
+This emits a `200` response with `type: string`, `format: binary`, the selected
+media type, and a documented `Content-Disposition` header. For several media
+types or custom headers, use `WithBinaryResponse(...)`,
+`WithResponseMediaTypes(...)`, and `WithResponseHeader(name, description, example)`.
+
 ### Schema generation rules
 
 | Go type | OpenAPI type |

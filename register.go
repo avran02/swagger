@@ -48,6 +48,40 @@ func (b *Registration) WithResponse(resp any) *Registration {
 	return b
 }
 
+// WithResponseMediaTypes overrides the media types of the successful response.
+func (b *Registration) WithResponseMediaTypes(mediaTypes ...string) *Registration {
+	b.meta.ResponseMediaTypes = append([]string(nil), mediaTypes...)
+	return b
+}
+
+// WithBinaryResponse documents a downloadable/streamed binary response.
+// Common media types are application/octet-stream, application/pdf and image/png.
+func (b *Registration) WithBinaryResponse(mediaTypes ...string) *Registration {
+	b.meta.BinaryResponse = true
+	b.meta.ResponseDTO = nil
+	if len(mediaTypes) == 0 {
+		mediaTypes = []string{"application/octet-stream"}
+	}
+	b.meta.ResponseMediaTypes = append([]string(nil), mediaTypes...)
+	return b
+}
+
+// WithResponseHeader documents a header returned with the successful response.
+// example is typically "attachment; filename=report.pdf" for Content-Disposition.
+func (b *Registration) WithResponseHeader(name, description, example string) *Registration {
+	if b.meta.ResponseHeaders == nil {
+		b.meta.ResponseHeaders = make(map[string]types.ResponseHeaderSpec)
+	}
+	b.meta.ResponseHeaders[name] = types.ResponseHeaderSpec{Description: description, Example: example}
+	return b
+}
+
+// WithDownload is shorthand for a binary response with Content-Disposition.
+func (b *Registration) WithDownload(mediaType, contentDisposition string) *Registration {
+	b.WithBinaryResponse(mediaType)
+	return b.WithResponseHeader("Content-Disposition", "Download disposition and filename", contentDisposition)
+}
+
 // WithSecurity sets the endpoint's security scheme (swagger.Public or
 // swagger.Bearer). Default is Public.
 func (b *Registration) WithSecurity(t SecurityType) *Registration {
