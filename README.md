@@ -32,6 +32,18 @@ go get github.com/avran02/swagger
 
 Requires Go 1.22+. The only dependency is `gopkg.in/yaml.v3` (for YAML serialisation); the router (chi) is injected by your code and never imported by the library.
 
+## Examples
+
+Two runnable programs live under `example/`:
+
+- [example/basic](example/basic/main.go) — the smallest useful integration: one DTO, one handler, one route, one served spec.
+- [example/advanced](example/advanced/main.go) — every feature exercised: the fluent `Register` builder, `Public`/`Bearer` security, per-endpoint error codes with a custom per-endpoint schema, `Document422`, a self-referential response DTO, a pluggable JSON codec, and the Swagger UI.
+
+```bash
+go run ./example/basic     # http://localhost:8080/greet?name=World
+go run ./example/advanced  # http://localhost:8080/docs
+```
+
 ## Quick start
 
 ### 1. Register handlers
@@ -388,7 +400,7 @@ The only dependency is `gopkg.in/yaml.v3` for YAML serialisation.
 - Anonymous closures created from the same function literal share one pointer — avoid registering them, use named controller methods.
 - Method values on **different instances of the same type** (`ctrlA.Create` and `ctrlB.Create`) also share one pointer. Registering both silently overwrites the first registration. If you run several instances of one controller type, give each route its own named handler function.
 
-**Routers without Walk.** Any router works as long as you can enumerate its routes. With `http.ServeMux` keep a slice of `{method, pattern, handler}` and replay it in the walker — see [example/main.go](example/main.go).
+**Routers without Walk.** Any router works as long as you can enumerate its routes. With `http.ServeMux` keep a slice of `{method, pattern, handler}` and replay it in the walker — see [example/basic/main.go](example/basic/main.go) or [example/advanced/main.go](example/advanced/main.go).
 
 **Call order.** `SetRouter` must be called after all routes are mounted. `GenerateOpenAPI` (and `ServeSpec`) can be called any number of times after that — the Walk result is cached and only re-computed when new handlers are registered.
 
