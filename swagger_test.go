@@ -19,7 +19,7 @@ type pageReq struct {
 func TestBindOr422_Success(t *testing.T) {
 	t.Parallel()
 
-	r := httptest.NewRequest(http.MethodGet, "/?page=3", nil)
+	r := httptest.NewRequest(http.MethodGet, "/?page=3&force=false", nil)
 	w := httptest.NewRecorder()
 
 	var req pageReq

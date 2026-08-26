@@ -1,6 +1,7 @@
 package binder
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/avran02/swagger/codec"
 )
@@ -79,12 +81,13 @@ func errType(t reflect.Type) string {
 // fieldPlan is the precompiled binding recipe for one (field, source) pair:
 // where to read the raw value from, which struct field to set, and how.
 type fieldPlan struct {
-	index   []int // field index path into the struct (through embedded structs)
-	source  string
-	key     string
-	def     string // `default` tag value
-	errType string
-	set     setterFunc
+	index    []int // field index path into the struct (through embedded structs)
+	source   string
+	key      string
+	def      string // `default` tag value
+	errType  string
+	set      setterFunc
+	required bool
 }
 
 // structPlan holds everything BindRequest needs to know about a DTO type,
@@ -155,12 +158,13 @@ func compileFields(t reflect.Type, index []int, p *structPlan) {
 		for _, source := range [...]string{"query", "path", "header", "cookie"} {
 			if tag, ok := field.Tag.Lookup(source); ok {
 				p.fields = append(p.fields, fieldPlan{
-					index:   idx,
-					source:  source,
-					key:     parseTagName(tag),
-					def:     field.Tag.Get("default"),
-					errType: et,
-					set:     set,
+					index:    idx,
+					source:   source,
+					key:      parseTagName(tag),
+					def:      field.Tag.Get("default"),
+					errType:  et,
+					set:      set,
+					required: runtimeRequired(field, source),
 				})
 			}
 		}
@@ -263,7 +267,7 @@ func BindRequest(r *http.Request, dst any) error {
 	plan := planFor(rv.Type())
 	verr := &ValidationError{}
 
-	if err := bindBody(r, dst, plan); err != nil {
+	if err := bindBody(r, dst, rv, plan, verr); err != nil {
 		verr.Detail = append(verr.Detail, FieldError{
 			Loc:  []string{"body"},
 			Msg:  err.Error(),
@@ -281,12 +285,15 @@ func BindRequest(r *http.Request, dst any) error {
 
 // bindBody decodes the JSON body into dst when the Content-Type is
 // application/json AND the struct has at least one `json` tag.
-func bindBody(r *http.Request, dst any, plan *structPlan) error {
+func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr *ValidationError) error {
 	if !plan.hasJSON {
 		return nil
 	}
 	ct := r.Header.Get("Content-Type")
 	if r.Body == nil || r.ContentLength == 0 {
+		if methodHasBody(r.Method) {
+			validateJSONRequired(nil, rv.Type(), nil, verr)
+		}
 		return nil
 	}
 	if !strings.Contains(ct, "application/json") {
@@ -296,7 +303,11 @@ func bindBody(r *http.Request, dst any, plan *structPlan) error {
 	if err != nil {
 		return err
 	}
-	return codec.UnmarshalStrict(data, dst)
+	if err := codec.UnmarshalStrict(data, dst); err != nil {
+		return err
+	}
+	validateJSONRequired(data, rv.Type(), nil, verr)
+	return nil
 }
 
 // bindNonBody fills query / path / header / cookie fields following the
@@ -308,33 +319,121 @@ func bindNonBody(r *http.Request, rv reflect.Value, plan *structPlan, verr *Vali
 		f := &plan.fields[i]
 
 		raw := ""
+		present := false
 		switch f.source {
 		case "query":
 			if query == nil {
 				query = r.URL.Query()
 			}
-			raw = query.Get(f.key)
+			values, ok := query[f.key]
+			present = ok && len(values) > 0
+			if present {
+				raw = values[0]
+			}
 		case "path":
 			if chiURLParam != nil {
 				raw = chiURLParam(r, f.key)
+				present = raw != ""
 			}
 		case "header":
-			raw = r.Header.Get(f.key)
+			values, ok := r.Header[http.CanonicalHeaderKey(f.key)]
+			present = ok && len(values) > 0
+			if present {
+				raw = values[0]
+			}
 		case "cookie":
 			if c, err := r.Cookie(f.key); err == nil {
 				raw = c.Value
+				present = true
 			}
 		}
 
-		if raw == "" {
+		if !present && f.def != "" {
 			raw = f.def
+			present = true
 		}
-		if raw == "" {
+		if !present {
+			if f.source == "path" && chiURLParam == nil {
+				continue
+			}
+			if f.required {
+				verr.add(f.source, f.key, "missing", fmt.Errorf("Field required"))
+			}
 			continue
 		}
 
 		if err := f.set(rv.FieldByIndex(f.index), raw); err != nil {
 			verr.add(f.source, f.key, f.errType, err)
+		}
+	}
+}
+
+func runtimeRequired(field reflect.StructField, source string) bool {
+	if source == "path" {
+		return true
+	}
+	if v, ok := field.Tag.Lookup("required"); ok {
+		return !strings.EqualFold(strings.TrimSpace(v), "false")
+	}
+	return field.Type.Kind() != reflect.Ptr
+}
+
+func methodHasBody(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+		return true
+	}
+	return false
+}
+
+func validateJSONRequired(data []byte, t reflect.Type, prefix []string, verr *ValidationError) {
+	var object map[string]json.RawMessage
+	if len(data) > 0 && json.Unmarshal(data, &object) != nil {
+		return
+	}
+	validateJSONObject(object, t, prefix, verr)
+}
+
+func validateJSONObject(object map[string]json.RawMessage, t reflect.Type, prefix []string, verr *ValidationError) {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if f.Anonymous {
+			validateJSONObject(object, f.Type, prefix, verr)
+			continue
+		}
+		tag, ok := f.Tag.Lookup("json")
+		if !ok || tag == "-" {
+			continue
+		}
+		name := parseTagName(tag)
+		if name == "" {
+			name = f.Name
+		}
+		_, present := object[name]
+		required := runtimeRequired(f, "json") && !strings.Contains(tag, "omitempty")
+		if required && !present {
+			verr.Detail = append(verr.Detail, FieldError{Loc: append(append([]string{"body"}, prefix...), name), Msg: "Field required", Type: "missing"})
+		}
+		if present {
+			ft := f.Type
+			for ft.Kind() == reflect.Ptr {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct && ft != reflect.TypeOf(time.Time{}) {
+				var child map[string]json.RawMessage
+				if json.Unmarshal(object[name], &child) == nil {
+					validateJSONObject(child, ft, append(prefix, name), verr)
+				}
+			}
 		}
 	}
 }

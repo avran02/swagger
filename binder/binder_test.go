@@ -13,12 +13,12 @@ import (
 type bindTarget struct {
 	Name   string   `json:"name"`
 	Page   int      `query:"page"  default:"1"`
-	Depth  int      `query:"depth"`
-	Force  bool     `query:"force"`
+	Depth  int      `query:"depth" required:"false"`
+	Force  bool     `query:"force" required:"false"`
 	Rating *float64 `query:"rating"`
-	Token  string   `header:"X-Token"`
-	Sess   string   `cookie:"session"`
-	ID     int64    `path:"id"`
+	Token  string   `header:"X-Token" required:"false"`
+	Sess   string   `cookie:"session" required:"false"`
+	ID     int64    `path:"id" required:"false"`
 }
 
 func TestBindRequest_QueryHeaderCookie(t *testing.T) {
@@ -175,5 +175,23 @@ func TestBindRequest_NilAndNonPointer(t *testing.T) {
 	var dst bindTarget
 	if err := binder.BindRequest(r, dst); err == nil {
 		t.Error("expected error for non-pointer dst")
+	}
+}
+func TestBindRequest_MissingRequiredQueryAndJSON(t *testing.T) {
+	type request struct {
+		Search string `query:"search" required:"true"`
+		Name   string `json:"name" required:"true"`
+		Note   string `json:"note,omitempty" required:"false"`
+	}
+	r := httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"note":"ok"}`))
+	r.Header.Set("Content-Type", "application/json")
+	var dst request
+	err := binder.BindRequest(r, &dst)
+	var verr *binder.ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("want ValidationError, got %v", err)
+	}
+	if len(verr.Detail) != 2 {
+		t.Fatalf("detail = %+v, want two missing fields", verr.Detail)
 	}
 }
