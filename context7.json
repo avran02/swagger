@@ -1,0 +1,29 @@
+{
+  "projectTitle": "goswagger",
+  "description": "Runtime OpenAPI 3.0 specification generation and HTTP request binding for Go.",
+  "branch": "master",
+  "excludeFolders": [
+    ".git",
+    ".github",
+    "vendor",
+    "node_modules"
+  ],
+  "excludeFiles": [
+    "bench_get_test.go",
+    "bench_large_test.go",
+    "bench_test.go"
+  ],
+  "rules": [
+    "The module requires Go 1.22 or newer.",
+    "Use the root package github.com/avran02/swagger for the public API unless a lower-level package is explicitly needed.",
+    "Register handlers before generating the OpenAPI document, and configure the router walker with SetRouter when route paths and methods must be resolved.",
+    "The library is router-agnostic; integrate a router by adapting its route-walking API to registry.Walker.",
+    "DTO struct tags describe request sources and OpenAPI metadata: json, query, path, header, cookie, and form (multipart is an alias for form).",
+    "Prefer the documented fluent Register API for endpoint-specific response, security, error, binary, and download metadata."
+  ],
+  "previousVersions": [
+    { "tag": "v0.0.0" },
+    { "tag": "v0.0.1" },
+    { "tag": "v0.0.2" }
+  ]
+}
