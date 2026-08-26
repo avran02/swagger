@@ -288,6 +288,70 @@ func TestBuild_NoErrorSchema_PlainResponses(t *testing.T) {
 	}
 }
 
+// fileNode mirrors the structure printed by the linux `tree` command: a
+// directory entry that recursively contains more entries of the same type.
+type fileNode struct {
+	Name     string      `json:"name"`
+	IsDir    bool        `json:"isDir"`
+	Children []*fileNode `json:"children,omitempty"`
+}
+
+func TestBuild_RecursiveComponent_TreeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	reg := registry.NewRegistry()
+	reg.RegisterRequestDTO(h, nil, fileNode{}, types.Public, []string{"Tree"})
+	reg.SetWalker(func(fn registry.WalkFunc) error {
+		return fn("GET", "/tree", h)
+	})
+
+	spec, err := builder.Build(reg, builder.Config{Title: "T", Version: "1"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	op := spec.Paths["/tree"].Get
+	if op == nil {
+		t.Fatal("GET /tree missing")
+	}
+	resp := op.Responses["200"]
+	if resp == nil || resp.Content == nil {
+		t.Fatal("200 response missing")
+	}
+	respSchema := resp.Content["application/json"].Schema
+	if respSchema == nil || respSchema.Ref != "#/components/schemas/builder_test.fileNode" {
+		t.Fatalf("200 schema = %+v, want $ref to fileNode", respSchema)
+	}
+
+	comp := spec.Components.Schemas["builder_test.fileNode"]
+	if comp == nil {
+		t.Fatal("fileNode component missing")
+	}
+	children := comp.Properties["children"]
+	if children == nil || children.Type != "array" {
+		t.Fatalf("children should be array, got %+v", children)
+	}
+	items := children.Items
+	if items == nil {
+		t.Fatal("children.items missing")
+	}
+	// []*fileNode → nullable ref must be wrapped in allOf (no $ref siblings).
+	itemRef := items.Ref
+	if itemRef == "" && len(items.AllOf) == 1 {
+		itemRef = items.AllOf[0].Ref
+	}
+	if itemRef != "#/components/schemas/builder_test.fileNode" {
+		t.Fatalf("children.items must $ref back to fileNode, got %+v", items)
+	}
+
+	// The recursive component must not blow up YAML marshalling (no infinite
+	// expansion / cyclic struct walk).
+	if _, err := builder.MarshalYAML(spec); err != nil {
+		t.Fatalf("MarshalYAML with recursive component: %v", err)
+	}
+}
+
 func TestBuild_ServersFromBasePath(t *testing.T) {
 	t.Parallel()
 
