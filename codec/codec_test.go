@@ -106,3 +106,16 @@ func TestSet_CustomStrictCodec_IsUsed(t *testing.T) {
 		t.Error("expected UnmarshalStrict to be called on the custom codec")
 	}
 }
+
+func TestUnmarshalStrict_RejectsTrailingInput(t *testing.T) {
+	for _, input := range []string{`{"x":1} {}`, `{"x":1} garbage`} {
+		var p point
+		if err := (stdCodec{}).UnmarshalStrict([]byte(input), &p); err == nil {
+			t.Fatalf("accepted %q", input)
+		}
+	}
+	var p point
+	if err := (stdCodec{}).UnmarshalStrict([]byte("{\"x\":1} \n"), &p); err != nil {
+		t.Fatal(err)
+	}
+}

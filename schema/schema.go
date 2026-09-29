@@ -252,7 +252,7 @@ func (g *Generator) structSchema(t reflect.Type) *Schema {
 		requiredTag, hasRequiredTag := field.Tag.Lookup("required")
 		explicitlyOptional := hasRequiredTag && tagFalse(requiredTag)
 
-		if !omitempty && !isPointer && !explicitlyOptional {
+		if !omitempty && (!isPointer || hasRequiredTag) && !explicitlyOptional {
 			required = append(required, jsonName)
 		}
 
@@ -293,7 +293,7 @@ func (g *Generator) structSchemaInline(t reflect.Type) *Schema {
 		requiredTag, hasRequiredTag := field.Tag.Lookup("required")
 		explicitlyOptional := hasRequiredTag && tagFalse(requiredTag)
 
-		if !omitempty && !isPointer && !explicitlyOptional {
+		if !omitempty && (!isPointer || hasRequiredTag) && !explicitlyOptional {
 			required = append(required, jsonName)
 		}
 		props[jsonName] = fs

@@ -1,13 +1,17 @@
 package binder
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,6 +99,7 @@ type fieldPlan struct {
 // structPlan holds everything BindRequest needs to know about a DTO type,
 // computed once via reflection and reused for every request.
 type structPlan struct {
+	err     error
 	hasJSON bool
 	hasForm bool
 	fields  []fieldPlan
@@ -135,6 +140,9 @@ func planFor(t reflect.Type) *structPlan {
 func compile(t reflect.Type) *structPlan {
 	p := &structPlan{hasJSON: hasTag(t, "json")}
 	compileFields(t, nil, p)
+	if p.hasJSON && p.hasForm && p.err == nil {
+		p.err = fmt.Errorf("binder: DTO must not mix JSON and multipart body fields")
+	}
 	return p
 }
 
@@ -156,10 +164,26 @@ func compileFields(t reflect.Type, index []int, p *structPlan) {
 			continue
 		}
 
+		sources := 0
+		if tag, ok := field.Tag.Lookup("json"); ok && parseTagName(tag) != "-" {
+			sources++
+		}
 		set := compileSetter(field.Type)
 		et := errType(field.Type)
 		for _, source := range [...]string{"query", "path", "header", "cookie", "form", "multipart"} {
 			if tag, ok := field.Tag.Lookup(source); ok {
+				key := parseTagName(tag)
+				if key == "-" {
+					continue
+				}
+				if key == "" {
+					p.err = fmt.Errorf("binder: field %s has an empty %s tag", field.Name, source)
+					continue
+				}
+				sources++
+				if sources > 1 {
+					p.err = fmt.Errorf("binder: field %s must declare only one binding source", field.Name)
+				}
 				bindingSource := source
 				if source == "multipart" {
 					bindingSource = "form"
@@ -213,7 +237,7 @@ func compileSetter(t reflect.Type) setterFunc {
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return func(fv reflect.Value, raw string) error {
-			n, err := strconv.ParseInt(raw, 10, 64)
+			n, err := strconv.ParseInt(raw, 10, t.Bits())
 			if err != nil {
 				return err
 			}
@@ -222,7 +246,7 @@ func compileSetter(t reflect.Type) setterFunc {
 		}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return func(fv reflect.Value, raw string) error {
-			n, err := strconv.ParseUint(raw, 10, 64)
+			n, err := strconv.ParseUint(raw, 10, t.Bits())
 			if err != nil {
 				return err
 			}
@@ -231,9 +255,12 @@ func compileSetter(t reflect.Type) setterFunc {
 		}
 	case reflect.Float32, reflect.Float64:
 		return func(fv reflect.Value, raw string) error {
-			n, err := strconv.ParseFloat(raw, 64)
+			n, err := strconv.ParseFloat(raw, t.Bits())
 			if err != nil {
 				return err
+			}
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				return fmt.Errorf("non-finite number is not allowed")
 			}
 			fv.SetFloat(n)
 			return nil
@@ -276,6 +303,9 @@ func BindRequest(r *http.Request, dst any) error {
 	}
 
 	plan := planFor(rv.Type())
+	if plan.err != nil {
+		return plan.err
+	}
 	verr := &ValidationError{}
 
 	if err := bindBody(r, dst, rv, plan, verr); err != nil {
@@ -297,39 +327,48 @@ func BindRequest(r *http.Request, dst any) error {
 // bindBody decodes the JSON body into dst when the Content-Type is
 // application/json AND the struct has at least one `json` tag.
 func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr *ValidationError) error {
-	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
-		return bindMultipart(r, rv, plan, verr)
-	}
-	if plan.hasForm {
-		for i := range plan.fields {
-			f := &plan.fields[i]
-			if f.source == "form" && f.required {
-				verr.add("body", f.key, "missing", fmt.Errorf("Field required"))
-			}
-		}
+	if !plan.hasJSON && !plan.hasForm {
 		return nil
 	}
-	if !plan.hasJSON {
-		return nil
-	}
-	ct := r.Header.Get("Content-Type")
 	if r.Body == nil || r.ContentLength == 0 {
-		if methodHasBody(r.Method) {
+		if plan.hasForm {
+			for _, f := range plan.fields {
+				if f.source == "form" && f.required {
+					verr.add("body", f.key, "missing", fmt.Errorf("Field required"))
+				}
+			}
+		} else if methodHasBody(r.Method) {
 			validateJSONRequired(nil, rv.Type(), nil, verr)
 		}
 		return nil
 	}
-	if !strings.Contains(ct, "application/json") {
-		return nil
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		return fmt.Errorf("invalid Content-Type: %w", err)
 	}
+	if plan.hasForm {
+		if mediaType != "multipart/form-data" {
+			return fmt.Errorf("expected Content-Type multipart/form-data")
+		}
+		return bindMultipart(r, rv, plan, verr)
+	}
+	if mediaType != "application/json" {
+		return fmt.Errorf("expected Content-Type application/json")
+	}
+
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
 	}
+	// Validate the complete input and its allowed field sources before decoding
+	// into dst. A JSON decoder alone also accepts exported non-body fields.
+	validateJSONRequired(data, rv.Type(), nil, verr)
+	if len(verr.Detail) > 0 {
+		return nil
+	}
 	if err := codec.UnmarshalStrict(data, dst); err != nil {
 		return err
 	}
-	validateJSONRequired(data, rv.Type(), nil, verr)
 	return nil
 }
 
@@ -477,53 +516,172 @@ func methodHasBody(method string) bool {
 }
 
 func validateJSONRequired(data []byte, t reflect.Type, prefix []string, verr *ValidationError) {
-	var object map[string]json.RawMessage
-	if len(data) > 0 && json.Unmarshal(data, &object) != nil {
+	if len(data) == 0 {
+		data = []byte("{}")
+	}
+	if !json.Valid(data) {
+		verr.Detail = append(verr.Detail, FieldError{Loc: []string{"body"}, Msg: "Expected exactly one valid JSON value", Type: "json_invalid"})
 		return
 	}
-	validateJSONObject(object, t, prefix, verr)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber() // inspecting keys must not impose float64 limits on JSON numbers
+	if err := rejectDuplicateJSONKeys(dec); err != nil {
+		bodyError(verr, prefix, "json_invalid", err.Error())
+		return
+	}
+	validateJSONValue(data, t, prefix, verr)
 }
 
-func validateJSONObject(object map[string]json.RawMessage, t reflect.Type, prefix []string, verr *ValidationError) {
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
+// Repeated object keys can make the validation view (last value wins)
+// differ from decoding into Go structs (nested objects may be merged).
+func rejectDuplicateJSONKeys(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
 	}
-	if t.Kind() != reflect.Struct {
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for dec.More() {
+		if delim == '{' {
+			key, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			name := key.(string) // syntax was checked with json.Valid
+			if seen[name] {
+				return fmt.Errorf("Duplicate JSON field %q", name)
+			}
+			seen[name] = true
+		}
+		if err := rejectDuplicateJSONKeys(dec); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
+}
+
+func bodyError(verr *ValidationError, path []string, kind, message string) {
+	loc := append([]string{"body"}, path...)
+	verr.Detail = append(verr.Detail, FieldError{Loc: loc, Msg: message, Type: kind})
+}
+
+func childPath(prefix []string, name string) []string {
+	return append(append([]string(nil), prefix...), name)
+}
+
+// jsonFields deliberately includes only explicitly tagged body fields. This
+// keeps external binding sources inaccessible to the body, including aliases
+// that encoding/json would otherwise accept by Go name or case folding.
+func jsonFields(t reflect.Type, fields map[string]reflect.StructField, visiting map[reflect.Type]bool) {
+	if visiting[t] {
 		return
 	}
+	visiting[t] = true
+	defer delete(visiting, t)
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() {
 			continue
 		}
-		if f.Anonymous {
-			validateJSONObject(object, f.Type, prefix, verr)
-			continue
-		}
-		tag, ok := f.Tag.Lookup("json")
-		if !ok || tag == "-" {
-			continue
-		}
+		tag, tagged := f.Tag.Lookup("json")
 		name := parseTagName(tag)
+		if name == "-" {
+			continue
+		}
+		ft := f.Type
+		for ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if f.Anonymous && name == "" && ft.Kind() == reflect.Struct {
+			jsonFields(ft, fields, visiting)
+			continue
+		}
+		if !tagged {
+			continue
+		}
 		if name == "" {
 			name = f.Name
 		}
-		_, present := object[name]
-		required := runtimeRequired(f, "json") && !strings.Contains(tag, "omitempty")
-		if required && !present {
-			verr.Detail = append(verr.Detail, FieldError{Loc: append(append([]string{"body"}, prefix...), name), Msg: "Field required", Type: "missing"})
+		fields[name] = f
+	}
+}
+
+func validateJSONValue(data []byte, t reflect.Type, prefix []string, verr *ValidationError) {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		if t.Kind() != reflect.Ptr && t.Kind() != reflect.Interface {
+			bodyError(verr, prefix, "null_not_allowed", "Null is not allowed")
 		}
-		if present {
-			ft := f.Type
-			for ft.Kind() == reflect.Ptr {
-				ft = ft.Elem()
-			}
-			if ft.Kind() == reflect.Struct && ft != reflect.TypeOf(time.Time{}) {
-				var child map[string]json.RawMessage
-				if json.Unmarshal(object[name], &child) == nil {
-					validateJSONObject(child, ft, append(prefix, name), verr)
+		return
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == reflect.TypeOf(time.Time{}) {
+		return
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(data, &object); err != nil {
+			bodyError(verr, prefix, "object_type", "Expected a JSON object")
+			return
+		}
+		fields := make(map[string]reflect.StructField)
+		jsonFields(t, fields, make(map[reflect.Type]bool))
+		names := make([]string, 0, len(fields))
+		for name := range fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			f := fields[name]
+			raw, present := object[name]
+			required := runtimeRequired(f, "json") && !jsonTagOption(f.Tag.Get("json"), "omitempty")
+			if !present {
+				if required {
+					bodyError(verr, childPath(prefix, name), "missing", "Field required")
 				}
+				continue
 			}
+			validateJSONValue(raw, f.Type, childPath(prefix, name), verr)
+		}
+		var unknown []string
+		for name := range object {
+			if _, ok := fields[name]; !ok {
+				unknown = append(unknown, name)
+			}
+		}
+		sort.Strings(unknown)
+		for _, name := range unknown {
+			bodyError(verr, childPath(prefix, name), "extra_forbidden", "Unknown body field")
+		}
+	case reflect.Slice, reflect.Array:
+		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+			return
+		}
+		var items []json.RawMessage
+		if json.Unmarshal(data, &items) != nil {
+			return
+		} // decoder reports type errors
+		for i, item := range items {
+			validateJSONValue(item, t.Elem(), childPath(prefix, strconv.Itoa(i)), verr)
+		}
+	case reflect.Map:
+		var items map[string]json.RawMessage
+		if json.Unmarshal(data, &items) != nil {
+			return
+		}
+		keys := make([]string, 0, len(items))
+		for key := range items {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			validateJSONValue(items[key], t.Elem(), childPath(prefix, key), verr)
 		}
 	}
 }
@@ -533,7 +691,7 @@ func validateJSONObject(object map[string]json.RawMessage, t reflect.Type, prefi
 func hasTag(t reflect.Type, tagName string) bool {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if _, ok := f.Tag.Lookup(tagName); ok {
+		if tag, ok := f.Tag.Lookup(tagName); ok && f.IsExported() && parseTagName(tag) != "-" {
 			return true
 		}
 		if f.Anonymous && f.Type.Kind() == reflect.Struct {
@@ -546,6 +704,16 @@ func hasTag(t reflect.Type, tagName string) bool {
 }
 
 // parseTagName extracts the name part of a "name,option1,option2" tag value.
+func jsonTagOption(tag, option string) bool {
+	parts := strings.Split(tag, ",")
+	for _, value := range parts[1:] {
+		if value == option {
+			return true
+		}
+	}
+	return false
+}
+
 func parseTagName(tag string) string {
 	parts := strings.SplitN(tag, ",", 2)
 	return strings.TrimSpace(parts[0])

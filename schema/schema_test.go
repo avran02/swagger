@@ -202,3 +202,22 @@ func keys[V any](m map[string]V) []string {
 	}
 	return out
 }
+
+func TestSchemaForType_ExplicitRequiredPointer(t *testing.T) {
+	type request struct {
+		Name     *string `json:"name" required:"true"`
+		Optional *string `json:"optional"`
+	}
+	g := schema.NewGenerator()
+	g.SchemaForType(reflect.TypeOf(request{}))
+	var body *schema.Schema
+	for _, s := range g.Components {
+		body = s
+	}
+	if len(body.Required) != 1 || body.Required[0] != "name" {
+		t.Fatalf("required = %v", body.Required)
+	}
+	if !body.Properties["name"].Nullable {
+		t.Fatal("required pointer must still allow null")
+	}
+}

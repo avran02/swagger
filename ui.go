@@ -1,6 +1,7 @@
 package swagger
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -18,7 +19,7 @@ type UIConfig struct {
 	SpecURL string
 
 	// CDN is the base URL for swagger-ui assets.
-	// Defaults to unpkg (https://unpkg.com/swagger-ui-dist@latest).
+	// Defaults to unpkg (https://unpkg.com/swagger-ui-dist@5.17.14).
 	// Pin a specific version for reproducible builds:
 	//   CDN: "https://unpkg.com/swagger-ui-dist@5.17.14"
 	CDN string
@@ -232,10 +233,11 @@ func renderUIHTML(c UIConfig) string {
 func js(s string) template.JS { return template.JS(s) } //nolint:gosec
 
 func jsonString(s string) string {
-	// Minimal JSON string encoding — only characters that appear in URLs/keywords.
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
+	data, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	} // string values are always JSON-encodable
+	return string(data)
 }
 
 func jsonBool(b bool) string {

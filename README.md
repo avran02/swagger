@@ -169,7 +169,7 @@ These tags control how the field appears in the generated spec:
 | `enum:"a,b,c"` | Restricts allowed values |
 | `format:"uuid"` | Overrides the schema format |
 
-Pointer fields (`*T`) are always optional and nullable — no tag needed.
+Pointer fields (`*T`) are optional and nullable by default. `required:"true"` requires the key to be present; its value may still be `null`.
 
 ### Multipart uploads
 
@@ -231,7 +231,22 @@ When a field pointing to a named struct carries per-field annotations (`example`
 
 - slice parameters (`?tag=a&tag=b`) — only the first value is read;
 - `time.Time` in query/path/header/cookie parameters (fine in JSON bodies);
-- distinguishing an explicitly empty parameter (`?q=`) from an absent one — both fall back to `default` or leave the field untouched.
+- custom struct-shaped JSON representations need to match the declared JSON fields (apart from the built-in `time.Time` support).
+
+An explicitly empty parameter (`?q=`) is different from an absent one: string fields receive an empty string, numeric fields fail conversion, and defaults apply only when the parameter is absent.
+
+### Strict request contract
+
+`BindRequest` rejects malformed or ambiguous input instead of silently repairing it:
+
+- A non-empty JSON body requires `Content-Type: application/json` (media-type parameters such as `charset` are accepted). Multipart DTOs require `multipart/form-data`. A different or missing media type produces a binding error; `BindOr422` returns 422.
+- A JSON body must contain exactly one object. Trailing values, trailing garbage and duplicate object keys are rejected.
+- Only explicitly declared `json` fields are accepted, with the exact declared spelling. Exported Go names, case-insensitive aliases and fields belonging to query/path/header/cookie sources cannot be supplied through JSON. This validation also applies when a custom JSON codec is installed.
+- Required fields are checked recursively in objects, arrays and maps. `null` is accepted for pointers and interfaces; non-pointer concrete fields require a non-null value. Use a pointer when null is part of the contract.
+- Numeric parameters must fit the destination Go type; overflow, NaN and infinity are errors.
+- A `-` binding tag excludes that source. Empty non-JSON binding names, multiple sources on one field, and DTOs mixing JSON with multipart body fields are configuration errors reported by `BindRequest`.
+
+These rules intentionally reject some requests previously accepted by the binder. For mixed DTOs, keep body fields explicitly tagged and use `json:"-"` on external-source fields when the DTO is also used with a standalone JSON decoder.
 
 ### Full example DTO
 

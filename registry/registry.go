@@ -65,6 +65,7 @@ func (r *Registry) RegisterMeta(handler http.HandlerFunc, meta types.EndpointMet
 	// endpoint doesn't pay for compiling the binding plan.
 	binder.Precompile(meta.RequestDTO)
 	r.mu.Lock()
+	meta = cloneMeta(meta)
 	r.byPtr[meta.HandlerPtr] = &meta
 	r.resolved = nil // invalidate
 	r.mu.Unlock()
@@ -98,7 +99,7 @@ func (r *Registry) Endpoints() ([]types.EndpointMeta, error) {
 	defer r.mu.Unlock()
 
 	if r.resolved != nil {
-		return r.resolved, nil
+		return cloneEndpoints(r.resolved), nil
 	}
 
 	if r.walker == nil {
@@ -106,13 +107,14 @@ func (r *Registry) Endpoints() ([]types.EndpointMeta, error) {
 		// Useful in unit tests that register endpoints without a real chi router.
 		out := make([]types.EndpointMeta, 0, len(r.byPtr))
 		for _, m := range r.byPtr {
-			out = append(out, *m)
+			out = append(out, cloneMeta(*m))
 		}
 		return out, nil
 	}
 
 	// Walk the chi router to resolve path + method for each registered handler.
 	matched := make(map[uintptr]bool)
+	resolvedEndpoints := make([]types.EndpointMeta, 0, len(r.byPtr))
 
 	walkErr := r.walker(func(method, route string, handler http.Handler, _ ...func(http.Handler) http.Handler) error {
 		ptr := handlerPtr(handler)
@@ -121,7 +123,7 @@ func (r *Registry) Endpoints() ([]types.EndpointMeta, error) {
 			resolved := *meta
 			resolved.Path = route
 			resolved.Method = method
-			r.resolved = append(r.resolved, resolved)
+			resolvedEndpoints = append(resolvedEndpoints, resolved)
 			matched[ptr] = true
 		}
 		return nil
@@ -134,11 +136,12 @@ func (r *Registry) Endpoints() ([]types.EndpointMeta, error) {
 	// (e.g. registered but not yet mounted, or Walk not reflecting them).
 	for ptr, meta := range r.byPtr {
 		if !matched[ptr] {
-			r.resolved = append(r.resolved, *meta)
+			resolvedEndpoints = append(resolvedEndpoints, *meta)
 		}
 	}
 
-	return r.resolved, nil
+	r.resolved = resolvedEndpoints
+	return cloneEndpoints(r.resolved), nil
 }
 
 // Reset clears all registered metadata. Useful in tests.
@@ -161,5 +164,33 @@ func handlerPtr(h http.Handler) uintptr {
 	if fn, ok := h.(http.HandlerFunc); ok {
 		return reflect.ValueOf(fn).Pointer()
 	}
-	return reflect.ValueOf(h).Pointer()
+	// Unregistered handlers may be arbitrary values implementing ServeHTTP.
+	// Only function handlers can match registrations keyed by function pointer.
+	v := reflect.ValueOf(h)
+	if v.IsValid() && v.Kind() == reflect.Func {
+		return v.Pointer()
+	}
+	return 0
+}
+
+func cloneMeta(meta types.EndpointMeta) types.EndpointMeta {
+	meta.Tags = append([]string(nil), meta.Tags...)
+	meta.Errors = append([]types.ErrorSpec(nil), meta.Errors...)
+	meta.ResponseMediaTypes = append([]string(nil), meta.ResponseMediaTypes...)
+	if meta.ResponseHeaders != nil {
+		headers := make(map[string]types.ResponseHeaderSpec, len(meta.ResponseHeaders))
+		for k, v := range meta.ResponseHeaders {
+			headers[k] = v
+		}
+		meta.ResponseHeaders = headers
+	}
+	return meta
+}
+
+func cloneEndpoints(endpoints []types.EndpointMeta) []types.EndpointMeta {
+	out := make([]types.EndpointMeta, len(endpoints))
+	for i, ep := range endpoints {
+		out[i] = cloneMeta(ep)
+	}
+	return out
 }

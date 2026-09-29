@@ -6,6 +6,8 @@ package codec
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 )
 
 // Codec abstracts JSON encode/decode.
@@ -34,7 +36,17 @@ func (stdCodec) Unmarshal(data []byte, v any) error { return json.Unmarshal(data
 func (stdCodec) UnmarshalStrict(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("codec: expected exactly one JSON value")
+	}
+	return nil
 }
 
 // active is the codec used by Marshal / Unmarshal / UnmarshalStrict. Reads
