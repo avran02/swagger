@@ -520,3 +520,19 @@ mux.Get("/docs",         swagger.ServeUI(swagger.UIConfig{
 | `Filter` | `*bool` | `true` | Show search/filter bar |
 | `PersistAuthorization` | `*bool` | `true` | Keep auth tokens across browser refreshes |
 | `TryItOutEnabled` | `*bool` | `false` | Pre-enable "Try it out" for all operations |
+
+## Automatic MCP server
+
+The optional [MCP adapter](mcp/README.md) builds tools at startup from the same
+registered routes and DTOs. It serves Streamable HTTP on a separate listener;
+the example uses API port `8080` and MCP port `8081`:
+
+```sh
+cd mcp
+go run ./example
+```
+
+Requires Go 1.25+ only for the adapter; the core library remains Go 1.22.
+GET/HEAD tools are enabled by default. Write operations require an explicit
+filter; API credentials and tenant headers are supplied server-side. See the
+adapter documentation for integration, limitations, and business risks.
