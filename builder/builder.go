@@ -93,6 +93,9 @@ type SecurityRequirement map[string][]string
 
 // Config controls the generated spec metadata.
 type Config struct {
+	// SchemaOptions configures type-level metadata for this specification only.
+	SchemaOptions []schema.Option
+
 	Title   string
 	Version string
 
@@ -136,7 +139,7 @@ func DefaultConfig() Config {
 
 // Build assembles an OpenAPISpec from the given registry using cfg for metadata.
 func Build(reg *registry.Registry, cfg Config) (*OpenAPISpec, error) {
-	gen := schema.NewGenerator()
+	gen := schema.NewGenerator(cfg.SchemaOptions...)
 
 	spec := &OpenAPISpec{
 		OpenAPI: "3.0.3",
@@ -179,6 +182,9 @@ func Build(reg *registry.Registry, cfg Config) (*OpenAPISpec, error) {
 		setOperation(spec.Paths[path], ep.Method, op)
 	}
 
+	if err := gen.Err(); err != nil {
+		return nil, err
+	}
 	return spec, nil
 }
 

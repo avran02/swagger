@@ -8,22 +8,22 @@ import "time"
 
 // FolderCreateRequest is the request DTO for creating a folder.
 type FolderCreateRequest struct {
-	Name        string  `json:"name"                  example:"My Folder"`
-	Description *string `json:"description,omitempty" example:"Optional description"`
-	ParentID    *string `json:"parent_id,omitempty"`
-	Visibility  string  `json:"visibility"             enum:"private,shared,public" example:"private" description:"Who can see this folder"`
-	Ref         string  `query:"ref"                  example:"campaign-123"`
+	Name        string     `json:"name"                  example:"My Folder"`
+	Description *string    `json:"description,omitempty" example:"Optional description"`
+	ParentID    *string    `json:"parent_id,omitempty"`
+	Visibility  Visibility `json:"visibility"             example:"private" description:"Who can see this folder"`
+	Ref         string     `query:"ref"                  example:"campaign-123"`
 }
 
 // FolderCreateResponse is the response DTO returned after folder creation.
 type FolderCreateResponse struct {
-	ID          string    `json:"id"          example:"fld_01J3K"`
-	Name        string    `json:"name"        example:"My Folder"`
-	Description *string   `json:"description,omitempty"`
-	ParentID    *string   `json:"parent_id,omitempty"`
-	Visibility  string    `json:"visibility"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string     `json:"id"          example:"fld_01J3K"`
+	Name        string     `json:"name"        example:"My Folder"`
+	Description *string    `json:"description,omitempty"`
+	ParentID    *string    `json:"parent_id,omitempty"`
+	Visibility  Visibility `json:"visibility"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // FolderGetRequest carries path and query params for fetching a folder.
@@ -104,4 +104,28 @@ type CreateUserResponse struct {
 	Name      string    `json:"name"       example:"Alice"`
 	Role      string    `json:"role"       example:"member"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Visibility declares reusable metadata without importing Swagger into the domain.
+type Visibility string
+
+const (
+	VisibilityPrivate Visibility = "private"
+	VisibilityShared  Visibility = "shared"
+	VisibilityPublic  Visibility = "public"
+)
+
+func (Visibility) EnumValues() []any {
+	return []any{VisibilityPrivate, VisibilityShared, VisibilityPublic}
+}
+
+// Valid reuses the values for non-HTTP entry points. BindOr422 validates
+// EnumValues automatically without calling this method.
+func (v Visibility) Valid() bool {
+	for _, allowed := range v.EnumValues() {
+		if allowed == v {
+			return true
+		}
+	}
+	return false
 }

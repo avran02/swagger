@@ -166,10 +166,99 @@ These tags control how the field appears in the generated spec:
 | `default:"value"` | Sets the default value in the schema; `BindRequest` also applies it when the parameter is missing from the request |
 | `example:"value"` | Sets the example value |
 | `description:"text"` | Sets the field description |
-| `enum:"a,b,c"` | Restricts allowed values |
+| `enum:"a,b,c"` | Declares allowed values in schemas and validates them in `BindOr422` / `BindAndValidate` |
 | `format:"uuid"` | Overrides the schema format |
 
+Enum values are comma-separated and whitespace is trimmed. Numeric and boolean
+fields produce numeric and boolean enum values, not strings. For slices, the enum
+applies to each item (`items.enum`). Pointer fields retain their nullable schema and include `null` in the enum.
+An empty string is an allowed string enum value when explicitly listed (for
+example, `enum:"article,test,"`). Invalid values, including numeric overflow and
+non-finite floats, cause the entire enum annotation to be omitted.
+
 Pointer fields (`*T`) are optional and nullable by default. `required:"true"` requires the key to be present; its value may still be `null`.
+
+### Reusable enum types
+
+For a domain enum used by several DTOs, declare its values on the type once:
+
+```go
+type Status string
+
+const (
+    Draft     Status = "draft"
+    Published Status = "published"
+)
+
+func (Status) EnumValues() []any {
+    return []any{Draft, Published}
+}
+
+type ArticleResponse struct {
+    Status Status `json:"status"`
+}
+```
+
+This structural interface needs no Swagger import in the domain package. The
+same metadata is used for request bodies, responses, parameters, multipart
+fields, array items, and map values. Named strings, booleans, signed/unsigned
+integers and finite floating-point numbers are supported. Duplicate values are
+removed while preserving declaration order. Nullable fields include `null`.
+
+Implement `EnumValues` on a value receiver where possible. It is called once per
+type per generator on a zero value (or a non-nil pointer to one for pointer
+receivers), so it must not depend on receiver state. Return values of the matching
+underlying scalar kind; do not include `nil`. An empty list, wrong value kind,
+overflow or non-finite number fails specification generation with a type-specific
+error. Low-level `schema.Generator` users must check `g.Err()` after generation.
+
+For types you cannot modify, or when keeping metadata outside the domain, pass
+an option to the specification configuration:
+
+```go
+// Priority may also be imported from another package.
+type Priority int
+
+cfg := swagger.Config{
+    Title: "API",
+    SchemaOptions: []swagger.SchemaOption{
+        swagger.Enum[Priority](1, 2, 3),
+    },
+}
+```
+
+Options apply only to that specification; there is no global enum registry. Use
+named types to avoid restricting every field with the same primitive type. The
+low-level equivalent is `schema.NewGenerator(schema.WithEnum[Priority](1, 2, 3))`.
+A valid field `enum` tag overrides a type option; an option overrides the type's
+`EnumValues` method. The last option wins for repeated registrations of a type.
+Tags remain useful for a restriction specific to one operation.
+
+`BindOr422` and `BindAndValidate` validate these same enum definitions. Invalid
+input produces a `ValidationError` with error type `enum` and a field path such as
+`["body", "items", "0", "status"]` or `["query", "status"]`. Validation covers
+supplied JSON fields, nested objects, array items, map values, parameters and
+multipart scalars. Missing optional fields and permitted `null` values are
+accepted; parameter defaults are validated when applied.
+
+`BindRequest` retains its binding-only behavior. For types configured through
+options, pass the same options to binding explicitly; no global registration is
+required:
+
+```go
+if !swagger.BindOr422(w, r, &req, cfg.SchemaOptions...) {
+    return
+}
+// Alternatively, handle errors yourself:
+err := swagger.BindAndValidate(r, &req, cfg.SchemaOptions...)
+```
+
+Invalid type-level enum definitions are application configuration errors:
+`BindAndValidate` returns an `*swagger.EnumDefinitionError`, and `BindOr422`
+returns a generic HTTP 500 without exposing metadata details. Validate the
+specification at startup to catch these definitions before serving requests.
+Domain validation can reuse `EnumValues` for non-HTTP entry points. The library
+does not infer Go constants or generate code.
 
 ### Multipart uploads
 
@@ -331,7 +420,10 @@ if exists {
 
 ## Validation errors — FastAPI-style 422
 
-`BindRequest` collects **all** binding failures and returns them as a `*swagger.ValidationError`. The `BindOr422` helper turns that into an automatic `422 Unprocessable Entity` response:
+`BindRequest` collects binding failures into a `*swagger.ValidationError`.
+`BindAndValidate` additionally checks enum values. `BindOr422` performs both
+steps and writes an automatic `422 Unprocessable Entity` response for invalid
+input:
 
 ```go
 func (c *ArticlesController) Create(w http.ResponseWriter, r *http.Request) {

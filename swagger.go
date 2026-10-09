@@ -12,6 +12,7 @@ import (
 	"github.com/avran02/swagger/builder"
 	"github.com/avran02/swagger/codec"
 	"github.com/avran02/swagger/registry"
+	"github.com/avran02/swagger/schema"
 	"github.com/avran02/swagger/types"
 )
 
@@ -114,7 +115,7 @@ func BindRequest(r *http.Request, dst any) error {
 	return binder.BindRequest(r, dst)
 }
 
-// BindOr422 populates dst from the request. On a binding failure it writes an
+// BindOr422 binds dst and validates enum values. On invalid input it writes an
 // HTTP 422 Unprocessable Entity response with a FastAPI-style JSON body
 // ({"detail": [{"loc": ["query","page"], "msg": ..., "type": ...}, ...]}) and
 // returns false — the handler should simply return:
@@ -128,8 +129,15 @@ func BindRequest(r *http.Request, dst any) error {
 //	}
 //
 // Pair it with Config.Document422 so the 422 response appears in the spec.
-func BindOr422(w http.ResponseWriter, r *http.Request, dst any) bool {
-	if err := binder.BindRequest(r, dst); err != nil {
+// Pass Config.SchemaOptions for externally registered enum types. Invalid enum
+// definitions produce a generic HTTP 500 response instead of an input error.
+func BindOr422(w http.ResponseWriter, r *http.Request, dst any, options ...SchemaOption) bool {
+	if err := binder.BindAndValidate(r, dst, options...); err != nil {
+		var definitionError *binder.EnumDefinitionError
+		if errors.As(err, &definitionError) {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return false
+		}
 		WriteValidationError(w, err)
 		return false
 	}
@@ -213,4 +221,25 @@ func ServeSpecJSON(cfg ...Config) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	}
+}
+
+// EnumValues is the optional type-level enum metadata interface. Implementing
+// it supplies allowed values to schemas and BindOr422 / BindAndValidate.
+type EnumValues = schema.EnumValues
+
+// EnumDefinitionError reports invalid application enum metadata, not input.
+type EnumDefinitionError = binder.EnumDefinitionError
+
+// SchemaOption configures schema generation and optional binding validation.
+type SchemaOption = schema.Option
+
+// Enum declares allowed values for a scalar type without modifying that type.
+// Pass the result in Config.SchemaOptions. Use an explicit type argument for
+// untyped constants, e.g. Enum[ExternalStatus](Draft, Published).
+func Enum[T schema.EnumScalar](values ...T) SchemaOption { return schema.WithEnum(values...) }
+
+// BindAndValidate binds dst and validates enum values without writing a response.
+// Pass the same SchemaOptions used to build the specification for external types.
+func BindAndValidate(r *http.Request, dst any, options ...SchemaOption) error {
+	return binder.BindAndValidate(r, dst, options...)
 }

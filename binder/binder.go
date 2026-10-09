@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/avran02/swagger/codec"
+	"github.com/avran02/swagger/schema"
 )
 
 // chiURLParam is the function signature compatible with chi's URLParam.
@@ -289,6 +290,10 @@ func compileSetter(t reflect.Type) setterFunc {
 // The reflection walk over dst's type happens once per type — the resulting
 // binding plan is cached, so subsequent calls only pay for value conversion.
 func BindRequest(r *http.Request, dst any) error {
+	return bindRequest(r, dst, false, nil)
+}
+
+func bindRequest(r *http.Request, dst any, validateEnums bool, options []schema.Option) error {
 	if dst == nil {
 		return fmt.Errorf("binder: dst must not be nil")
 	}
@@ -307,8 +312,15 @@ func BindRequest(r *http.Request, dst any) error {
 		return plan.err
 	}
 	verr := &ValidationError{}
+	var enums *enumValidation
+	if validateEnums {
+		enums = enumValidationFor(rv.Type(), options)
+		if enums.err != nil {
+			return enums.err
+		}
+	}
 
-	if err := bindBody(r, dst, rv, plan, verr); err != nil {
+	if err := bindBody(r, dst, rv, plan, verr, enums); err != nil {
 		verr.Detail = append(verr.Detail, FieldError{
 			Loc:  []string{"body"},
 			Msg:  err.Error(),
@@ -316,7 +328,7 @@ func BindRequest(r *http.Request, dst any) error {
 		})
 	}
 
-	bindNonBody(r, rv, plan, verr)
+	bindNonBody(r, rv, plan, verr, enums)
 
 	if len(verr.Detail) > 0 {
 		return verr
@@ -326,7 +338,7 @@ func BindRequest(r *http.Request, dst any) error {
 
 // bindBody decodes the JSON body into dst when the Content-Type is
 // application/json AND the struct has at least one `json` tag.
-func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr *ValidationError) error {
+func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr *ValidationError, enums *enumValidation) error {
 	if !plan.hasJSON && !plan.hasForm {
 		return nil
 	}
@@ -350,7 +362,7 @@ func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr
 		if mediaType != "multipart/form-data" {
 			return fmt.Errorf("expected Content-Type multipart/form-data")
 		}
-		return bindMultipart(r, rv, plan, verr)
+		return bindMultipart(r, rv, plan, verr, enums)
 	}
 	if mediaType != "application/json" {
 		return fmt.Errorf("expected Content-Type application/json")
@@ -369,12 +381,15 @@ func bindBody(r *http.Request, dst any, rv reflect.Value, plan *structPlan, verr
 	if err := codec.UnmarshalStrict(data, dst); err != nil {
 		return err
 	}
+	if enums != nil {
+		enums.json(data, rv, enums.body, []string{"body"}, verr)
+	}
 	return nil
 }
 
 // bindNonBody fills query / path / header / cookie fields following the
 // precompiled plan, appending every failure to verr.
-func bindNonBody(r *http.Request, rv reflect.Value, plan *structPlan, verr *ValidationError) {
+func bindNonBody(r *http.Request, rv reflect.Value, plan *structPlan, verr *ValidationError, enums *enumValidation) {
 	var query url.Values // parsed lazily, at most once per request
 
 	for i := range plan.fields {
@@ -427,13 +442,16 @@ func bindNonBody(r *http.Request, rv reflect.Value, plan *structPlan, verr *Vali
 			continue
 		}
 
-		if err := f.set(rv.FieldByIndex(f.index), raw); err != nil {
+		fv := rv.FieldByIndex(f.index)
+		if err := f.set(fv, raw); err != nil {
 			verr.add(f.source, f.key, f.errType, err)
+		} else if enums != nil {
+			enums.parameter(fv, f, verr)
 		}
 	}
 }
 
-func bindMultipart(r *http.Request, rv reflect.Value, plan *structPlan, verr *ValidationError) error {
+func bindMultipart(r *http.Request, rv reflect.Value, plan *structPlan, verr *ValidationError, enums *enumValidation) error {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		return err
 	}
@@ -472,6 +490,8 @@ func bindMultipart(r *http.Request, rv reflect.Value, plan *structPlan, verr *Va
 		}
 		if err := f.set(fv, raw); err != nil {
 			verr.add("body", f.key, f.errType, err)
+		} else if enums != nil {
+			enums.parameter(fv, f, verr)
 		}
 	}
 	return nil

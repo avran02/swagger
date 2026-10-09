@@ -1,8 +1,10 @@
 package schema
 
 import (
+	"math"
 	"mime/multipart"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,13 +34,19 @@ type Schema struct {
 // than inlined everywhere they appear.
 type Generator struct {
 	Components map[string]*Schema
+	enums      map[reflect.Type]enumDefinition
+	enumErrors []error
 }
 
 // NewGenerator creates a ready-to-use Generator.
-func NewGenerator() *Generator {
-	return &Generator{
-		Components: make(map[string]*Schema),
+func NewGenerator(options ...Option) *Generator {
+	g := &Generator{Components: make(map[string]*Schema), enums: make(map[reflect.Type]enumDefinition)}
+	for _, option := range options {
+		if option != nil {
+			option(g)
+		}
 	}
+	return g
 }
 
 // SchemaForType returns either a $ref (for named structs) or an inline Schema
@@ -53,8 +61,7 @@ func (g *Generator) SchemaForType(t reflect.Type) *Schema {
 
 	s := g.buildSchema(t)
 	if nullable && s != nil {
-		s = overrideTarget(s)
-		s.Nullable = true
+		s = nullableSchema(s)
 	}
 	return s
 }
@@ -68,14 +75,17 @@ func overrideTarget(s *Schema) *Schema {
 		return &Schema{AllOf: []*Schema{{Ref: s.Ref}}}
 	}
 	clone := *s
+	clone.Enum = append([]any(nil), s.Enum...)
 	return &clone
 }
 
-func (g *Generator) buildSchema(t reflect.Type) *Schema {
+func (g *Generator) buildSchema(t reflect.Type) (s *Schema) {
 	// Dereference pointer one more level if needed.
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+
+	defer func() { g.typeEnum(t, s) }()
 
 	// time.Time → string date-time
 	if t == timeType {
@@ -112,12 +122,11 @@ func (g *Generator) buildSchema(t reflect.Type) *Schema {
 		}
 		itemSchema := g.buildSchema(elemType)
 		if nullable {
-			itemSchema = overrideTarget(itemSchema)
-			itemSchema.Nullable = true
+			itemSchema = nullableSchema(itemSchema)
 		}
 		return &Schema{Type: "array", Items: itemSchema}
 	case reflect.Map:
-		return &Schema{Type: "object", AdditionalProperties: g.buildSchema(t.Elem())}
+		return &Schema{Type: "object", AdditionalProperties: g.SchemaForType(t.Elem())}
 	case reflect.Struct:
 		return g.structSchema(t)
 	case reflect.Interface:
@@ -165,7 +174,7 @@ func (g *Generator) MultipartSchemaForType(t reflect.Type) *Schema {
 		if isFileType(f.Type) {
 			s.Properties[name] = fileSchema(f.Type)
 		} else {
-			s.Properties[name] = g.SchemaForType(f.Type)
+			s.Properties[name] = g.fieldSchema(f)
 		}
 		if paramRequired(f, "form") {
 			s.Required = append(s.Required, name)
@@ -312,17 +321,7 @@ func (g *Generator) fieldSchema(field reflect.StructField) *Schema {
 		nullable = true
 	}
 
-	var s *Schema
-
-	// time.Time special case
-	if ft == timeType {
-		s = &Schema{Type: "string", Format: "date-time"}
-	} else if ft.Kind() == reflect.Struct {
-		ref := g.structSchema(ft)
-		s = ref
-	} else {
-		s = g.buildSchema(ft)
-	}
+	s := g.buildSchema(ft)
 
 	if s == nil {
 		s = &Schema{}
@@ -344,7 +343,7 @@ func (g *Generator) fieldSchema(field reflect.StructField) *Schema {
 
 	s = overrideTarget(s)
 	if nullable {
-		s.Nullable = true
+		s = nullableSchema(s)
 	}
 	if v, ok := field.Tag.Lookup("example"); ok {
 		s.Example = v
@@ -356,9 +355,7 @@ func (g *Generator) fieldSchema(field reflect.StructField) *Schema {
 		s.Format = v
 	}
 	if v, ok := field.Tag.Lookup("enum"); ok {
-		for _, e := range strings.Split(v, ",") {
-			s.Enum = append(s.Enum, strings.TrimSpace(e))
-		}
+		applyEnum(s, ft, v)
 	}
 	if v, ok := field.Tag.Lookup("description"); ok {
 		s.Description = v
@@ -429,13 +426,7 @@ func (g *Generator) fieldParameters(field reflect.StructField) []Parameter {
 			continue
 		}
 
-		paramSchema := g.buildSchema(field.Type)
-
-		// Attach default to the schema when present.
-		if defVal, ok := field.Tag.Lookup("default"); ok {
-			paramSchema = overrideTarget(paramSchema)
-			paramSchema.Default = defVal
-		}
+		paramSchema := g.fieldSchema(field)
 
 		p := Parameter{
 			Name:     name,
@@ -524,4 +515,57 @@ func uniqueStrings(ss []string) []string {
 		}
 	}
 	return out
+}
+
+// applyEnum documents scalar values, or the allowed items of an array. Invalid
+// tags are omitted as a whole rather than emitting a schema with mixed types.
+// BindAndValidate uses the resulting enum to validate bound values.
+func applyEnum(s *Schema, t reflect.Type, tag string) {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	target := s
+	if s.Type == "array" {
+		t = t.Elem()
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		target = overrideTarget(s.Items)
+	}
+	values := make([]any, 0)
+	for _, raw := range strings.Split(tag, ",") {
+		raw = strings.TrimSpace(raw)
+		var value any
+		var err error
+		switch t.Kind() {
+		case reflect.String:
+			value = raw
+		case reflect.Bool:
+			value, err = strconv.ParseBool(raw)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			value, err = strconv.ParseInt(raw, 10, t.Bits())
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			value, err = strconv.ParseUint(raw, 10, t.Bits())
+		case reflect.Float32, reflect.Float64:
+			var number float64
+			number, err = strconv.ParseFloat(raw, t.Bits())
+			if math.IsNaN(number) || math.IsInf(number, 0) {
+				return
+			}
+			value = number
+		default:
+			return
+		}
+		if err != nil {
+			return
+		}
+		values = append(values, value)
+	}
+	if target.Nullable {
+		values = append(values, nil)
+	}
+	target.Enum = values
+	if s.Type == "array" {
+		s.Items = target
+	}
 }
