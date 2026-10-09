@@ -23,3 +23,14 @@ func TestServeUI_EscapesScriptValues(t *testing.T) {
 		t.Fatal("encoded value missing")
 	}
 }
+
+func TestServeUI_EmbedsEnumHintsPlugin(t *testing.T) {
+	w := httptest.NewRecorder()
+	ServeUI(UIConfig{})(w, httptest.NewRequest("GET", "/docs/", nil))
+	html := w.Body.String()
+	for _, want := range []string{"function SwaggerEnumHintsPlugin(system)", "SwaggerUIBundle.plugins.DownloadUrl,\n      SwaggerEnumHintsPlugin", "!props.isExecute"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("missing enum hints integration: %q", want)
+		}
+	}
+}

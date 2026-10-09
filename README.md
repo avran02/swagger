@@ -628,3 +628,12 @@ Requires Go 1.25+ only for the adapter; the core library remains Go 1.22.
 GET/HEAD tools are enabled by default. Write operations require an explicit
 filter; API credentials and tenant headers are supplied server-side. See the
 adapter documentation for integration, limitations, and business risks.
+
+### Enum hints in Swagger UI
+
+Read-only JSON examples display all string enum choices, such as
+`"article|test|course|none|\"\"|null"`. Empty strings appear as `""` in
+the schema enum list. `Try it out` keeps a valid individual value; hints are
+never submitted automatically. Explicit field examples and defaults are
+preserved. OpenAPI schemas and downloaded specifications retain their original
+typed enums; the hints are a UI rendering feature.

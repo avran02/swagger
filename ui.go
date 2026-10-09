@@ -1,6 +1,7 @@
 package swagger
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -49,6 +50,9 @@ type UIConfig struct {
 	// TryItOutEnabled pre-enables "Try it out" for all operations. Default: false.
 	TryItOutEnabled *bool
 }
+
+//go:embed ui_enum.js
+var enumHintsJS string
 
 const defaultCDN = "https://unpkg.com/swagger-ui-dist@5.17.14"
 
@@ -163,6 +167,7 @@ var uiTemplate = template.Must(template.New("swagger-ui").Parse(`<!DOCTYPE html>
 <script src="{{.CDN}}/swagger-ui-bundle.js" crossorigin></script>
 <script src="{{.CDN}}/swagger-ui-standalone-preset.js" crossorigin></script>
 <script>
+{{.EnumHintsJS}}
 window.onload = function() {
   window.ui = SwaggerUIBundle({
     url:          {{.SpecURLJSON}},
@@ -178,7 +183,8 @@ window.onload = function() {
       SwaggerUIStandalonePreset
     ],
     plugins: [
-      SwaggerUIBundle.plugins.DownloadUrl
+      SwaggerUIBundle.plugins.DownloadUrl,
+      SwaggerEnumHintsPlugin
     ],
     layout: "StandaloneLayout"
   });
@@ -190,6 +196,7 @@ window.onload = function() {
 
 // uiTemplateData holds pre-serialised JSON values for the template.
 type uiTemplateData struct {
+	EnumHintsJS                  template.JS
 	Title                        string
 	CDN                          string
 	SpecURLJSON                  template.JS
@@ -208,6 +215,7 @@ func renderUIHTML(c UIConfig) string {
 	}
 
 	data := uiTemplateData{
+		EnumHintsJS:                  template.JS(enumHintsJS),
 		Title:                        title,
 		CDN:                          c.CDN,
 		SpecURLJSON:                  js(jsonString(c.SpecURL)),
